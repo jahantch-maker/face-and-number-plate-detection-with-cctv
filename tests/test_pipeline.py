@@ -45,7 +45,7 @@ def frame():
     return f
 
 
-def box(x, y=300, w=300, h=200):
+def box(x, y=300, w=500, h=200):
     return (x, y, x + w, y + h)
 
 
@@ -84,9 +84,19 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue((self.dir / r["crop_path"]).exists())
         self.assertTrue((self.dir / r["full_path"]).exists())
 
-    def test_vehicle_driving_past_without_stopping_is_ignored(self):
+    def test_vehicle_driving_past_without_stopping_is_captured_by_default(self):
         moving = [[Det(2, "car", 0.9, box(50 + 70 * i))] for i in range(14)]
         worker = CameraWorker(self.cam(), self.cfg, FakeDetector(moving), self.store,
+                              plates=FakePlates(["ABC123"]))
+        self.run_script(worker, 14)
+        rows, total = self.db.search({})
+        self.assertEqual(total, 1)
+        self.assertEqual(rows[0]["plate_text"], "ABC-123")
+
+    def test_vehicle_driving_past_is_ignored_when_stop_is_required(self):
+        cfg = _merge(DEFAULTS, {"tracking": {"require_stop": True}})
+        moving = [[Det(2, "car", 0.9, box(50 + 70 * i))] for i in range(14)]
+        worker = CameraWorker(self.cam(), cfg, FakeDetector(moving), self.store,
                               plates=FakePlates(["ABC123"]))
         self.run_script(worker, 14)
         self.assertEqual(self.db.search({})[1], 0)
@@ -106,7 +116,7 @@ class PipelineTests(unittest.TestCase):
     def test_roi_excludes_road_behind_barrier(self):
         cam = self.cam()
         cam["roi"] = [0, 0.6, 1, 1]          # only the lower 40 % of the picture counts
-        far = [[Det(1, "car", 0.9, box(400, y=100, h=150))] for _ in range(20)]
+        far = [[Det(1, "car", 0.9, box(400, y=100, h=150))] for _ in range(20)]   # big enough, but outside the ROI
         worker = CameraWorker(cam, self.cfg, FakeDetector(far), self.store, plates=FakePlates(["ABC123"]))
         self.run_script(worker, 20)
         self.assertEqual(self.db.search({})[1], 0)
@@ -129,6 +139,62 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(r["face_path"] and (self.dir / r["face_path"]).exists())
         self.assertEqual((r["upper_color"], r["lower_color"]), ("red", "blue"))
 
+    def test_far_away_vehicle_is_ignored(self):
+        small = [[Det(1, "car", 0.9, box(500, w=200, h=120))] for _ in range(20)]       # 200/1280 = 16% wide
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(small), self.store, plates=FakePlates(["ABC123"]))
+        self.run_script(worker, 20)
+        self.assertEqual(self.db.search({})[1], 0)
+
+    def test_far_tree_mistaken_for_person_is_ignored(self):
+        tree = [[Det(3, "person", 0.9, (900, 300, 940, 380))] for _ in range(20)]       # 80 px tall = 11%
+        worker = CameraWorker(self.cam("face"), self.cfg, FakeDetector(tree), self.store, faces=FakeFaces())
+        f = frame()
+        for i in range(20):
+            worker.step(f, 2000 + i / 6)
+        worker.step(f, 2020)
+        self.assertEqual(self.db.search({})[1], 0)
+
+    def test_low_confidence_person_is_ignored(self):
+        shaky = [[Det(4, "person", 0.40, (380, 300, 540, 640))] for _ in range(20)]
+        worker = CameraWorker(self.cam("face"), self.cfg, FakeDetector(shaky), self.store, faces=FakeFaces())
+        f = frame()
+        for i in range(20):
+            worker.step(f, 2000 + i / 6)
+        worker.step(f, 2020)
+        self.assertEqual(self.db.search({})[1], 0)
+
+    def test_near_person_without_a_face_is_not_saved_when_face_required(self):
+        class NoFaces:
+            def detect(self, bgr):
+                return []
+        near = [[Det(5, "person", 0.9, (380, 300, 540, 640))] for _ in range(20)]
+        worker = CameraWorker(self.cam("face"), self.cfg, FakeDetector(near), self.store, faces=NoFaces())
+        f = frame()
+        for i in range(20):
+            worker.step(f, 2000 + i / 6)
+        worker.step(f, 2020)
+        self.assertEqual(self.db.search({})[1], 0)
+        # ... but a camera can opt out of the rule
+        cam = self.cam("face")
+        cam["require_face"] = False
+        worker = CameraWorker(cam, self.cfg, FakeDetector(near), self.store, faces=NoFaces())
+        for i in range(20):
+            worker.step(f, 3000 + i / 6)
+        worker.step(f, 3020)
+        self.assertEqual(self.db.search({})[1], 1)
+
+    def test_tiny_face_is_ignored(self):
+        class TinyFace:
+            def detect(self, bgr):
+                return [(10.0, 10.0, 30.0, 30.0, 0.95)]      # 30 px wide < 50 px
+        near = [[Det(6, "person", 0.9, (380, 300, 540, 640))] for _ in range(20)]
+        worker = CameraWorker(self.cam("face"), self.cfg, FakeDetector(near), self.store, faces=TinyFace())
+        f = frame()
+        for i in range(20):
+            worker.step(f, 2000 + i / 6)
+        worker.step(f, 2020)
+        self.assertEqual(self.db.search({})[1], 0)
+
     def test_flush_saves_tracks_still_open_at_shutdown(self):
         a = [[Det(1, "car", 0.9, box(400))] for _ in range(18)]
         worker = CameraWorker(self.cam(), self.cfg, FakeDetector(a), self.store, plates=FakePlates(["ASY3549"]))
@@ -141,3 +207,175 @@ class PipelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DuplicateTests(PipelineTests):
+    """One record (max 3 photos) per person/vehicle, however often the tracker re-finds them."""
+
+    def _run(self, worker, script, t0=1000.0, fps=10):
+        f = frame()
+        for i in range(len(script)):
+            worker.step(f, t0 + i / fps)
+        worker.step(f, t0 + len(script) / fps + 6)
+
+    def person_box(self, x=380):
+        return (x, 300, x + 160, 640)
+
+    def test_each_record_has_at_most_three_photos(self):
+        stopped = [[Det(1, "car", 0.9, box(400))] for _ in range(30)]
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(stopped), self.store, plates=FakePlates(["ASY3549"]))
+        self._run(worker, stopped)
+        row = self.db.search({})[0][0]
+        photos = [row[k] for k in ("full_path", "crop_path", "plate_path", "face_path") if row[k]]
+        self.assertLessEqual(len(photos), 3)
+
+    def test_person_whose_track_id_switches_is_recorded_once(self):
+        a = [[Det(1, "person", 0.9, self.person_box())] for _ in range(25)]
+        gap = [[] for _ in range(3)]                       # tracker loses them for 0.3 s ...
+        b = [[Det(2, "person", 0.9, self.person_box(385))] for _ in range(25)]   # ... and re-finds at the same spot
+        worker = CameraWorker(self.cam("face"), self.cfg, FakeDetector(a + gap + b), self.store, faces=FakeFaces())
+        self._run(worker, a + gap + b)
+        self.assertEqual(self.db.search({"kind": "person"})[1], 1)
+
+    def test_long_stay_split_into_two_tracks_is_recorded_once(self):
+        cfg = _merge(self.cfg, {"tracking": {"max_dwell_seconds": 3}})
+        stay = [[Det(1, "car", 0.9, box(400))] for _ in range(80)]       # 8 s > 3 s dwell limit
+        worker = CameraWorker(self.cam(), cfg, FakeDetector(stay), self.store, plates=FakePlates(["ABC123", "XYZ999"]))
+        self._run(worker, stay)
+        self.assertEqual(self.db.search({})[1], 1)
+
+    def test_next_vehicle_arriving_from_the_side_is_still_recorded(self):
+        # car A stops at x=400 and leaves; car B enters from the left edge a moment later and stops at the same spot
+        class SwitchablePlates:
+            text = "AAA111"
+
+            def read(self, crop):
+                return [PlateRead(self.text, self.text, 0.9, True, (5, 5, 40, 20))]
+
+        a = [[Det(1, "car", 0.9, box(400))] for _ in range(25)]
+        b = [[Det(2, "car", 0.9, box(-100 + 50 * i))] for i in range(10)] + [[Det(2, "car", 0.9, box(400))] for _ in range(25)]
+        plates = SwitchablePlates()
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(a + b), self.store, plates=plates)
+        f = frame()
+        for i in range(len(a)):
+            worker.step(f, 1000 + i / 10)
+        plates.text = "BBB222"
+        for i in range(len(b)):
+            worker.step(f, 1000 + (len(a) + i) / 10)
+        worker.step(f, 1000 + (len(a) + len(b)) / 10 + 6)
+        rows = self.db.search({})[0]
+        self.assertEqual(sorted(r["plate_text"] for r in rows), ["AAA-111", "BBB-222"])
+
+    def test_same_spot_different_plate_arriving_instantly_is_not_lost(self):
+        # worst case: B appears exactly where A stood, right after A vanished, with a different plate
+        class SwitchablePlates:
+            text = "AAA111"
+
+            def read(self, crop):
+                return [PlateRead(self.text, self.text, 0.9, True, (5, 5, 40, 20))]
+
+        a = [[Det(1, "car", 0.9, box(400))] for _ in range(25)]
+        gap = [[] for _ in range(3)]
+        b = [[Det(2, "car", 0.9, box(400))] for _ in range(25)]
+        plates = SwitchablePlates()
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(a + gap + b), self.store, plates=plates)
+        f = frame()
+        for i in range(len(a) + len(gap)):
+            worker.step(f, 1000 + i / 10)
+        plates.text = "BBB222"
+        for i in range(len(b)):
+            worker.step(f, 1000 + (len(a) + len(gap) + i) / 10)
+        worker.step(f, 1000 + (len(a) + len(gap) + len(b)) / 10 + 6)
+        # Documented trade-off: indistinguishable from a tracker hiccup, so only ONE record is kept
+        self.assertEqual(self.db.search({})[1], 1)
+
+
+class PlateRobustnessTests(PipelineTests):
+    def _run_stop(self, worker, n=30, t0=1000.0):
+        f = frame()
+        for i in range(n):
+            worker.step(f, t0 + i / 10)
+        worker.step(f, t0 + n / 10 + 6)
+
+    def _stopped(self, n=30):
+        return [[Det(1, "motorcycle", 0.9, box(400, w=500, h=300))] for _ in range(n)]
+
+    def test_plate_photo_is_kept_even_when_text_cannot_be_read(self):
+        class DetectsOnly:
+            def read(self, img):
+                return [PlateRead("", "", 0.0, False, (10, 10, 90, 40), det_conf=0.9)]
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(self._stopped()), self.store, plates=DetectsOnly())
+        self._run_stop(worker)
+        row = self.db.search({})[0][0]
+        self.assertIsNone(row["plate_text"])
+        self.assertTrue(row["plate_path"] and (self.dir / row["plate_path"]).exists())
+
+    def test_uncertain_read_is_saved_with_low_confidence(self):
+        class Unsure:
+            def read(self, img):
+                return [PlateRead("FDX4944", "FDX4944", 0.25, True, (10, 10, 90, 40), det_conf=0.8)]
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(self._stopped()), self.store, plates=Unsure())
+        self._run_stop(worker)
+        row = self.db.search({})[0][0]
+        self.assertEqual(row["plate_text"], "FDX-4944")
+        self.assertLess(row["plate_conf"], 0.5)          # the web page shows it as "FDX-4944?"
+
+    def test_whole_picture_is_tried_when_the_vehicle_crop_gives_nothing(self):
+        class FullFrameOnly:
+            def read(self, img):
+                if img.shape[1] == 1280:                      # only the full frame
+                    return [PlateRead("FDX4944", "FDX4944", 0.9, True, (560, 450, 640, 480), det_conf=0.9)]
+                return []
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(self._stopped()), self.store, plates=FullFrameOnly())
+        self._run_stop(worker)
+        row = self.db.search({})[0][0]
+        self.assertEqual(row["plate_text"], "FDX-4944")
+        self.assertTrue((self.dir / row["plate_path"]).exists())
+
+    def test_colour_cast_variant_neutralises_a_red_scene(self):
+        from gatevision.plates import variants
+        red = np.zeros((60, 100, 3), np.uint8)
+        red[:] = (40, 40, 200)                                # strongly red picture
+        red[20:40, 30:70] = (120, 120, 255)
+        names = {n: v for n, v in variants(red)}
+        self.assertEqual(set(names), {"original", "balanced", "gray"})
+        m = names["balanced"].reshape(-1, 3).mean(axis=0)
+        self.assertLess(m.max() - m.min(), 25)                # channels now roughly equal
+
+
+class PlateFinderSafetyTests(PipelineTests):
+    def test_box_the_finder_doubts_is_ignored(self):
+        class Grass:
+            def read(self, img):
+                return [PlateRead("AB6425", "AB6425", 0.27, True, (0, 110, 40, 140), det_conf=0.27)]
+        stopped = [[Det(1, "motorcycle", 0.9, box(400, w=500, h=300))] for _ in range(30)]
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(stopped), self.store, plates=Grass())
+        f = frame()
+        for i in range(30):
+            worker.step(f, 1000 + i / 10)
+        worker.step(f, 1000 + 9)
+        row = self.db.search({})[0][0]
+        self.assertIsNone(row["plate_text"])              # "plate not read" is better than a wrong plate
+        self.assertIsNone(row["plate_path"])
+
+    def test_reader_falls_back_to_the_small_model_when_the_big_one_is_missing(self):
+        import sys
+        import types
+        calls = []
+
+        class FakeALPR:
+            def __init__(self, detector_model, ocr_model, **kw):
+                calls.append(detector_model)
+                if "608" in detector_model:
+                    raise ValueError("unknown model")
+
+        fake = types.ModuleType("fast_alpr")
+        fake.ALPR = FakeALPR
+        sys.modules["fast_alpr"] = fake
+        try:
+            from gatevision.plates import FALLBACK_DETECTORS, PlateReader
+            reader = PlateReader("yolo-v9-s-608-license-plate-end2end", "cct-xs-v1-global-model")
+            self.assertEqual(reader.detector_model, FALLBACK_DETECTORS[0])
+            self.assertEqual(calls[0], "yolo-v9-s-608-license-plate-end2end")
+        finally:
+            del sys.modules["fast_alpr"]

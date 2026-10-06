@@ -10,6 +10,9 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 
+import cv2
+import numpy as np
+
 _TO_LETTER = {"0": "O", "1": "I", "8": "B", "5": "S", "2": "Z", "6": "G", "4": "A"}
 _TO_DIGIT = {"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "B": "8", "S": "5", "Z": "2", "G": "6"}
 
@@ -24,6 +27,45 @@ class PlateRead:
     conf: float
     valid: bool          # matches the letters+digits pattern
     box: tuple | None = None   # (x1,y1,x2,y2) relative to the image given to read()
+    det_conf: float = 0.0      # how sure the detector is that this is a plate
+
+
+def variants(bgr):
+    """The same picture in versions that survive night-time colour casts.
+
+    1. as is
+    2. gray-world white balance + contrast boost (removes a red/orange cast)
+    3. grayscale + contrast boost
+    """
+    yield "original", bgr
+    f = bgr.astype(np.float32)
+    means = f.reshape(-1, 3).mean(axis=0) + 1e-6
+    wb = np.clip(f * (means.mean() / means), 0, 255).astype(np.uint8)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    lab = cv2.cvtColor(wb, cv2.COLOR_BGR2LAB)
+    lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+    yield "balanced", cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    g = clahe.apply(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY))
+    yield "gray", cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
+
+
+def crop_variants(plate):
+    """Many looks at ONE plate picture: bigger, slightly rotated (bikes park at
+    an angle), and only the top line (Pakistani plates carry a city / name line
+    underneath that confuses the reader)."""
+    h, w = plate.shape[:2]
+    if h < 8 or w < 8:
+        return
+    scale = 2.0 if w < 300 else 1.0
+    base = cv2.resize(plate, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC) if scale != 1.0 else plate
+    bh, bw = base.shape[:2]
+    for name, img in (("full", base), ("top", base[: max(8, int(bh * 0.65))])):
+        yield name, img
+    for ang in (-12, -6, 6, 12):
+        m = cv2.getRotationMatrix2D((bw / 2, bh / 2), ang, 1.0)
+        rot = cv2.warpAffine(base, m, (bw, bh), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+        yield f"rot{ang}", rot
+        yield f"rot{ang}top", rot[: max(8, int(bh * 0.65))]
 
 
 def pretty(text: str) -> str:
@@ -57,34 +99,96 @@ def correct_pk_plate(raw: str) -> tuple[str, bool]:
     return s, False
 
 
+FALLBACK_DETECTORS = ["yolo-v9-t-640-license-plate-end2end", "yolo-v9-t-512-license-plate-end2end",
+                      "yolo-v9-t-384-license-plate-end2end"]
+FALLBACK_DETECTOR = FALLBACK_DETECTORS[-1]
+
+
 class PlateReader:
-    def __init__(self, detector_model: str, ocr_model: str, use_gpu: bool = False):
+    def __init__(self, detector_model: str, ocr_model: str, use_gpu: bool = False,
+                 detector_conf_thresh: float | None = None):
+        import logging
         from fast_alpr import ALPR  # lazy import
 
-        kwargs = {}
-        if use_gpu:
-            kwargs.update(detector_providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
-                          ocr_providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
-        try:
-            self.alpr = ALPR(detector_model=detector_model, ocr_model=ocr_model, **kwargs)
-        except TypeError:  # older fast-alpr without provider kwargs
-            self.alpr = ALPR(detector_model=detector_model, ocr_model=ocr_model)
+        log = logging.getLogger("gatevision.plates")
+        gpu = {"detector_providers": ["CUDAExecutionProvider", "CPUExecutionProvider"],
+               "ocr_providers": ["CUDAExecutionProvider", "CPUExecutionProvider"]} if use_gpu else {}
+        thresh = {"detector_conf_thresh": detector_conf_thresh} if detector_conf_thresh else {}
+        # tolerate fast-alpr versions that do not know some keywords
+        kw_sets = [{**gpu, **thresh}, thresh, gpu, {}]
+        models = [detector_model] + [m for m in FALLBACK_DETECTORS if m != detector_model]
+        last = None
+        for model in models:
+            for kw in kw_sets:
+                try:
+                    self.alpr = ALPR(detector_model=model, ocr_model=ocr_model, **kw)
+                    self.detector_model = model
+                    if model != detector_model:
+                        log.warning("plate detector %s unavailable (%s) - using %s", detector_model, last, model)
+                    return
+                except TypeError as exc:
+                    last = exc
+                except Exception as exc:          # unknown model name, download problem ...
+                    last = exc
+                    break
+        raise last
 
-    def read(self, bgr) -> list[PlateRead]:
+    def read(self, bgr, extra_ocr: bool = True) -> list[PlateRead]:
+        """One pass. Plates the detector found but the OCR could not read come
+        back with empty text, so the caller can still keep their photo."""
         out: list[PlateRead] = []
         for r in self.alpr.predict(bgr) or []:
+            bb = r.detection.bounding_box
+            box = (int(bb.x1), int(bb.y1), int(bb.x2), int(bb.y2))
+            det_conf = float(getattr(r.detection, "confidence", 0.0) or 0.0)
             ocr = getattr(r, "ocr", None)
             if ocr is None or not getattr(ocr, "text", None):
+                out.append(PlateRead("", "", 0.0, False, box, det_conf))
                 continue
             conf = getattr(ocr, "confidence", 0.0)
-            if isinstance(conf, (list, tuple)):
-                conf = sum(conf) / len(conf) if conf else 0.0
+            if isinstance(conf, (list, tuple, np.ndarray)):
+                conf = float(np.mean(conf)) if len(conf) else 0.0
             text, valid = correct_pk_plate(ocr.text)
             if len(text) < 3:
+                out.append(PlateRead("", ocr.text, 0.0, False, box, det_conf))
                 continue
-            bb = r.detection.bounding_box
-            out.append(PlateRead(text, ocr.text, float(conf), valid,
-                                 (int(bb.x1), int(bb.y1), int(bb.x2), int(bb.y2))))
+            out.append(PlateRead(text, ocr.text, float(conf), valid, box, det_conf))
+        if extra_ocr:
+            for r in list(out):
+                if r.box and r.det_conf >= 0.35:
+                    out.extend(self._extra_reads(bgr, r.box, r.det_conf))
+        return out
+
+    def _extra_reads(self, bgr, box, det_conf) -> list[PlateRead]:
+        """Run only the OCR again on rotated / enlarged / top-line versions of the plate."""
+        ocr_model = getattr(self.alpr, "ocr", None)
+        if ocr_model is None:
+            return []
+        x1, y1, x2, y2 = box
+        h, w = bgr.shape[:2]
+        px, py = int((x2 - x1) * 0.08), int((y2 - y1) * 0.08)
+        crop = bgr[max(0, y1 - py):min(h, y2 + py), max(0, x1 - px):min(w, x2 + px)]
+        out: list[PlateRead] = []
+        for _name, img in crop_variants(crop):
+            try:
+                o = ocr_model.predict(img)
+            except Exception:
+                continue
+            if o is None or not getattr(o, "text", None):
+                continue
+            conf = getattr(o, "confidence", 0.0)
+            if isinstance(conf, (list, tuple, np.ndarray)):
+                conf = float(np.mean(conf)) if len(conf) else 0.0
+            text, valid = correct_pk_plate(o.text)
+            if len(text) >= 3 and valid:
+                out.append(PlateRead(text, o.text, float(conf), valid, box, det_conf))
+        return out
+
+    def read_robust(self, bgr) -> list[PlateRead]:
+        """Read the picture in several colour-corrected versions."""
+        out: list[PlateRead] = []
+        for _name, img in variants(bgr):
+            out.extend(self.read(img))
         return out
 
 

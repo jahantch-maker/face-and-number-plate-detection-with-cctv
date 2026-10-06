@@ -18,22 +18,31 @@ DEFAULTS = {
         "detector_device": None,        # None = auto (GPU if available); "cpu"; "0"
         "detector_imgsz": 960,
         "detector_conf": 0.35,
-        "plate_detector": "yolo-v9-t-384-license-plate-end2end",
+        "plate_detector": "yolo-v9-t-640-license-plate-end2end",   # best on tilted / red-lit plates in our gate test
         "plate_ocr": "cct-xs-v1-global-model",
         "face_model": "models/face_detection_yunet_2023mar.onnx",
     },
     "tracking": {
-        "process_fps": 6,          # frames per second analysed per camera
+        "process_fps": 15,         # frames per second analysed per camera, 0 = as fast as the PC can (the Cameras page shows what is really achieved)
         "lost_seconds": 2.0,       # track is finished when unseen this long
-        "min_track_seconds": 0.8,  # ignore flickers shorter than this
+        "min_track_seconds": 0.4,  # ignore flickers shorter than this
         "max_dwell_seconds": 120,  # force-save very long stays
         "stop_motion_ratio": 0.08, # moved < 8% of its size in 1 s => "stopped"
-        "require_stop": True,      # only save objects that actually stop
-        "ocr_interval": 0.4,       # seconds between plate reads of one vehicle
-        "max_ocr_attempts": 10,
-        "max_face_attempts": 12,
+        "require_stop": False,     # capture people/vehicles even while moving (True = only those that stop)
+        "ocr_interval": 0.15,      # seconds between plate reads of one vehicle
+        "max_ocr_attempts": 12,
+        "max_face_attempts": 20,
         "dedup_seconds": 15,       # same plate on same camera within this = one
-        "min_plate_conf": 0.35,
+        "min_plate_conf": 0.20,      # reads below 0.5 are shown with a "?" so a human checks the photo
+        # "Near the camera only" rules. Sizes are fractions of the picture, so
+        # they work for any camera resolution. Override per camera with
+        # min_height / min_width / require_face / person_conf in config.yaml.
+        "min_person_height": 0.40,   # a person must be at least 40% of the picture height
+        "min_vehicle_width": 0.30,   # a vehicle must be at least 30% of the picture width
+        "person_conf": 0.55,         # people detections below this certainty are ignored
+        "min_face_px": 50,           # ignore faces narrower than this many pixels
+        "require_face": True,        # face cameras save a person only if a face was found
+        "retrack_seconds": 4,        # same person/vehicle re-detected within this long at the same spot = ONE record
     },
     "web": {
         "host": "0.0.0.0",

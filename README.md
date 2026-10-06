@@ -17,6 +17,18 @@ Cameras --RTSP--> run_engine.py --> database + photos (D:\gatevision_data)
                     browser (phone/PC) <-- run_web.py (login, search, live list)
 ```
 
+## Quick start on the gate PC (Windows)
+
+1. Install **Python 3.12** from python.org (tick *Add python.exe to PATH*).
+2. In the NVR web page create a user `viewer` (live view only). Set each camera's main-stream frame rate to 10 fps.
+3. Unzip this folder (e.g. `C:\gate-vision`) and double-click **`install.bat`**. It installs everything
+   (GPU version automatically if an NVIDIA card is present), downloads the AI models, then asks you
+   a few questions (NVR address, channel numbers, folder, passwords) and tests every camera.
+4. Double-click **`start_all.bat`**, then open http://localhost:8080.
+5. When happy, right-click **`install_autostart.bat`** and *Run as administrator* so it starts after power cuts.
+
+The detailed manual steps are below for reference.
+
 ## 1. Recommended PC
 
 Windows 11 Pro, Intel i5 12th gen+ / Ryzen 5, **NVIDIA RTX 3060 12 GB** (or 3050 6 GB / 4060),
@@ -86,6 +98,8 @@ Do **not** forward a router port to this PC. Install **Tailscale** (free) on the
 
 | Problem | Setting |
 | --- | --- |
+| Far-away people/cars/trees are logged | raise `min_person_height` (0.40 -> 0.55) or `min_vehicle_width` (0.30 -> 0.40); per camera: `min_height`, `min_width` |
+| Real people near the camera are missed | lower `min_person_height`, or set `require_face: false` on that camera |
 | Cars on the public road behind the barrier are logged | give that camera a `roi` (box on the lower part of the picture) |
 | Vehicles are skipped because they barely pause | raise `stop_motion_ratio` (0.08 -> 0.15) |
 | Plates misread | `max_ocr_attempts` up, check shutter/glare; send me sample `*_result.jpg` files |

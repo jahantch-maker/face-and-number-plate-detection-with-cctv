@@ -31,3 +31,36 @@ class PlateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExtraOcrTests(unittest.TestCase):
+    def test_crop_variants_and_extra_reads_vote_out_a_single_bad_read(self):
+        import types
+        import numpy as np
+        from gatevision.plates import PlateReader, crop_variants, vote
+        names = [n for n, _ in crop_variants(np.zeros((60, 150, 3), np.uint8))]
+        self.assertIn("top", names)
+        self.assertIn("rot12", names)
+
+        class Ocr:
+            def __init__(self):
+                self.n = 0
+
+            def predict(self, img):
+                self.n += 1
+                txt = "ISK8004" if self.n == 1 else "TSK8104"
+                return types.SimpleNamespace(text=txt, confidence=0.8)
+
+        class Alpr:
+            ocr = Ocr()
+
+            def predict(self, img):
+                bb = types.SimpleNamespace(x1=10, y1=10, x2=140, y2=70)
+                det = types.SimpleNamespace(bounding_box=bb, confidence=0.9)
+                return [types.SimpleNamespace(detection=det, ocr=types.SimpleNamespace(text="ISK8004", confidence=0.59))]
+
+        reader = PlateReader.__new__(PlateReader)
+        reader.alpr = Alpr()
+        reads = reader.read(np.zeros((100, 200, 3), np.uint8))
+        text, share, _ = vote(reads)
+        self.assertEqual(text, "TSK8104")

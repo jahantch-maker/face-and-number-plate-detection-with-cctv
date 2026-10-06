@@ -8,7 +8,8 @@
   </div>
   <div class="meta">
     {% if r.kind == 'vehicle' %}
-      <div class="plate {{ '' if r.plate_text else 'none' }}">{{ r.plate_text or 'plate not read' }}</div>
+      <div class="plate {{ '' if r.plate_text else 'none' }}{{ ' unsure' if r.plate_text and r.plate_conf is not none and r.plate_conf < 0.5 }}"
+           {% if r.plate_text and r.plate_conf is not none and r.plate_conf < 0.5 %}title="Uncertain - check the plate photo"{% endif %}>{{ r.plate_text or 'plate not read' }}{{ '?' if r.plate_text and r.plate_conf is not none and r.plate_conf < 0.5 }}</div>
       <div class="chips">
         {% if r.color %}<span class="chip"><i class="sw {{ r.color }}"></i>{{ r.color }}</span>{% endif %}
         {% if r.vehicle_type %}<span class="chip">{{ r.vehicle_type }}</span>{% endif %}

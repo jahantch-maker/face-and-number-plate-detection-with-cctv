@@ -20,7 +20,9 @@ function build(r) {
   if (r.kind === 'vehicle' && r.plate_path) { const p = el('img', 'plateimg'); p.src = r.plate_path; th.append(p); }
   const m = el('div', 'meta'), chips = el('div', 'chips');
   if (r.kind === 'vehicle') {
-    m.append(el('div', 'plate' + (r.plate_text ? '' : ' none'), r.plate_text || 'plate not read'));
+    const unsure = r.plate_text && r.plate_conf !== null && r.plate_conf < 0.5;
+    m.append(el('div', 'plate' + (r.plate_text ? '' : ' none') + (unsure ? ' unsure' : ''),
+                r.plate_text ? r.plate_text + (unsure ? '?' : '') : 'plate not read'));
     if (r.color) chips.append(chip(r.color, r.color));
     if (r.vehicle_type) chips.append(el('span', 'chip', r.vehicle_type));
   } else {

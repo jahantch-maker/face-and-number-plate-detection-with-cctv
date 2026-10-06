@@ -50,7 +50,8 @@ def main():
             if args.role == "plate":
                 reads = plates.read(crop)
                 color = vehicle_color(crop)
-                txt = ", ".join(f"{pretty(r.text)} ({r.conf:.2f}{'' if r.valid else ', odd format'})" for r in reads) or "no plate read"
+                txt = ", ".join(f"{pretty(r.text)} ({r.conf:.2f}{'' if r.valid else ', odd format'})" for r in reads if r.text) \
+                    or ("plate found but not readable" if reads else "no plate found")
                 note = f"{label} {color} | {txt}"
             else:
                 up, lo = clothing_colors(crop)

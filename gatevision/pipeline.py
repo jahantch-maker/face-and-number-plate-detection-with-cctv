@@ -44,6 +44,8 @@ class TrackState:
         self.frames = 0
         self.labels: Counter = Counter()
         self.hist: deque = deque(maxlen=80)   # (ts, cx, cy, diag)
+        self.first_pos = None                 # (cx, cy, diag) where it first appeared
+        self.last_pos = None
         self.was_stopped = False
         self.best_score = -1.0
         self.best_crop = None
@@ -62,7 +64,11 @@ class TrackState:
         self.last_seen = ts
         self.frames += 1
         self.labels[det.label] += 1
-        self.hist.append(((ts), (x1 + x2) / 2, (y1 + y2) / 2, math.hypot(x2 - x1, y2 - y1)))
+        pos = ((x1 + x2) / 2, (y1 + y2) / 2, math.hypot(x2 - x1, y2 - y1))
+        self.hist.append((ts, *pos))
+        if self.first_pos is None:
+            self.first_pos = pos
+        self.last_pos = pos
 
     def is_stopped(self, ratio: float, window: float = 1.0, min_span: float = 0.4) -> bool:
         """True when the box centre barely moved over the last ``window`` s."""
@@ -93,6 +99,7 @@ class CameraWorker:
         self.last_plate: dict[str, float] = {}   # plate_norm -> ts of last event
         self.last_event_ts: float | None = None
         self.events_saved = 0
+        self.recent: list = []                    # (last_seen, last_pos) of recently recorded tracks
 
     # --------------------------------------------------------------- step
     def step(self, frame, ts: float):
@@ -101,10 +108,20 @@ class CameraWorker:
         roi = (rx1 * W, ry1 * H, rx2 * W, ry2 * H)
         role = self.cam["role"]
 
+        cam = self.cam
+        min_h = cam.get("min_height", self.t["min_person_height"])
+        min_w = cam.get("min_width", self.t["min_vehicle_width"])
+        person_conf = cam.get("person_conf", self.t["person_conf"])
+
         for d in self.detector.track(frame, role):
             x1, y1, x2, y2 = d.box
             foot_x, foot_y = (x1 + x2) / 2, y2
             if not (roi[0] <= foot_x <= roi[2] and roi[1] <= foot_y <= roi[3]):
+                continue
+            # only things CLOSE to the camera: big enough in the picture
+            if role == "face" and ((y2 - y1) / H < min_h or d.conf < person_conf):
+                continue
+            if role == "plate" and (x2 - x1) / W < min_w:
                 continue
             st = self.tracks.get(d.track_id)
             if st is None:
@@ -149,15 +166,36 @@ class CameraWorker:
         crop = _clip_crop(frame, det.box, pad=0.08)
         if crop is None:
             return
-        for r in self.plates.read(crop):
-            if r.conf < self.t["min_plate_conf"]:
-                continue
-            st.reads.append(r)
-            if r.conf > st.plate_img_conf and r.box:
-                bx1, by1, bx2, by2 = r.box
-                pc = _clip_crop(crop, (bx1, by1, bx2, by2), pad=0.15)
+        read = getattr(self.plates, "read_robust", self.plates.read)
+        self._take_reads(st, read(crop), crop)
+        # every 3rd attempt without any readable text: look at the whole picture too
+        if not any(r.text for r in st.reads) and st.ocr_attempts % 3 == 0:
+            x1, y1, x2, y2 = det.box
+            gx, gy = (x2 - x1) * 0.15, (y2 - y1) * 0.15
+            for r in read(frame):
+                if r.box and x1 - gx <= (r.box[0] + r.box[2]) / 2 <= x2 + gx \
+                        and y1 - gy <= (r.box[1] + r.box[3]) / 2 <= y2 + gy:
+                    self._take_reads(st, [r], frame)
+
+    def _take_reads(self, st: TrackState, reads, image):
+        """Keep readable texts for voting, and the best plate PHOTO even if the
+        text could not be read (so a human can still read it)."""
+        for r in reads:
+            if r.det_conf and r.det_conf < 0.35:
+                continue                      # the finder is not convinced this is a plate (grass, sticker ...)
+            if r.box:
+                w, h = r.box[2] - r.box[0], r.box[3] - r.box[1]
+                if h <= 0 or not (0.9 <= w / h <= 6.5):
+                    continue                  # plates are rectangles; leaves and bushes are not
+            if r.text and not r.valid and r.conf < 0.7:
+                continue                      # text that does not look like a plate and is not a sure read
+            if r.text and r.conf >= self.t["min_plate_conf"]:
+                st.reads.append(r)
+            quality = max(r.det_conf, r.conf)
+            if r.box and quality > st.plate_img_conf:
+                pc = _clip_crop(image, r.box, pad=0.15)
                 if pc is not None:
-                    st.plate_img, st.plate_img_conf = pc.copy(), r.conf
+                    st.plate_img, st.plate_img_conf = pc.copy(), quality
 
     def _find_face(self, st: TrackState, frame, det):
         st.face_attempts += 1
@@ -165,7 +203,10 @@ class CameraWorker:
         if crop is None:
             return
         upper = crop[: max(8, int(crop.shape[0] * 0.55))]
+        min_px = self.cam.get("min_face_px", self.t["min_face_px"])
         for (fx, fy, fw, fh, sc) in self.faces.detect(upper):
+            if fw < min_px:
+                continue
             fc = _clip_crop(upper, (fx, fy, fx + fw, fy + fh), pad=0.25)
             if fc is None:
                 continue
@@ -173,11 +214,34 @@ class CameraWorker:
             if score > st.face_score:
                 st.face_score, st.face_img = score, fc.copy()
 
+    def _is_retrack(self, st: TrackState) -> bool:
+        """True if ``st`` is the SAME object as a track recorded moments ago.
+
+        That happens when the tracker loses and re-finds someone who is standing
+        still, or when a long stay is split. It is the same object when the new
+        track appears right where the old one ended, within a few seconds, and
+        while the old one was already gone. A different vehicle arriving
+        behind starts at the entrance, not where the last one stood.
+        """
+        window = self.t["retrack_seconds"]
+        self.recent = [r for r in self.recent if st.first_seen - r[0] < 60]
+        for last_seen, pos in self.recent:
+            gap = st.first_seen - last_seen
+            if 0 <= gap <= window and st.first_pos and pos:
+                size = (st.first_pos[2] + pos[2]) / 2
+                dist = math.hypot(st.first_pos[0] - pos[0], st.first_pos[1] - pos[1])
+                if dist < 0.30 * size:
+                    return True
+        return False
+
     def _finalize(self, st: TrackState):
         dur = st.last_seen - st.first_seen
         if dur < self.t["min_track_seconds"] or st.frames < 3 or st.best_crop is None:
             return
         if self.t["require_stop"] and not st.was_stopped:
+            return
+        if self._is_retrack(st):
+            self.recent.append((st.last_seen, st.last_pos))     # chain: later re-tracks match this one too
             return
         label = st.labels.most_common(1)[0][0]
         cam = self.cam
@@ -188,7 +252,8 @@ class CameraWorker:
             "track_id": st.id, "extra": {"duration_s": round(dur, 1), "frames": st.frames},
         }
         if cam["role"] == "plate":
-            plate, conf, best = vote(st.reads, self.t["min_plate_conf"])
+            plate, share, best = vote(st.reads, self.t["min_plate_conf"])
+            conf = best.conf * share if best else 0.0          # how sure we are of the final text
             norm = plate or ""
             if norm and self.last_plate.get(norm, -1e9) > ev["ts"] - self.t["dedup_seconds"]:
                 self.last_plate[norm] = ev["ts"]
@@ -202,17 +267,21 @@ class CameraWorker:
             ev["extra"]["plate_raw"] = best.raw if best else None
             self.store.save_event(ev, full=st.best_full, crop=st.best_crop, plate=st.plate_img)
         else:
+            if self.cam.get("require_face", self.t["require_face"]) and st.face_img is None:
+                return                      # no face found: tree, shadow or someone far/turned away
             upper, lower = clothing_colors(st.best_crop)
             ev.update(kind="person", upper_color=upper, lower_color=lower)
             ev["extra"]["has_face"] = st.face_img is not None
             self.store.save_event(ev, full=st.best_full, crop=st.best_crop, face=st.face_img)
+        self.recent.append((st.last_seen, st.last_pos))
         self.events_saved += 1
         self.last_event_ts = ev["ts"]
         log.info("%s: saved %s event (%s)", cam["id"], ev["kind"], ev.get("plate_text") or label)
 
     # ---------------------------------------------------------- main loop
     def run(self, stream, stop_event, status_db=None):
-        interval = 1.0 / max(self.t["process_fps"], 0.5)
+        pf = self.t["process_fps"]
+        interval = 0.0 if pf <= 0 else 1.0 / max(pf, 0.5)      # 0 = as fast as the PC can
         last_idx, last_proc, last_status = -1, 0.0, 0.0
         processed, window_start = 0, time.time()
         fps = 0.0
