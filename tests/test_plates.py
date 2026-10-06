@@ -88,3 +88,73 @@ class RegistrationYearTests(unittest.TestCase):
     def test_partial_is_kept_when_nothing_better_exists(self):
         text, _s, _b = vote([PlateRead("MNC17", "", 0.8, True)])
         self.assertEqual(text, "MNC17")
+
+
+def _two_line_plate(top="MNF 17", bottom="811"):
+    import cv2
+    import numpy as np
+    img = np.full((140, 250, 3), 235, np.uint8)
+    img[:, :45] = (80, 160, 60)                                 # green emblem strip
+    cv2.putText(img, top.split()[0], (60, 62), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (20, 20, 20), 4)
+    cv2.putText(img, top.split()[1], (185, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2)
+    cv2.putText(img, bottom, (70, 126), cv2.FONT_HERSHEY_SIMPLEX, 1.7, (20, 20, 20), 4)
+    cv2.rectangle(img, (2, 2), (247, 137), (30, 30, 30), 3)
+    return img
+
+
+class TwoLinePlateTests(unittest.TestCase):
+    def test_two_line_plate_is_split_and_one_line_plate_is_not(self):
+        import cv2
+        import numpy as np
+        from gatevision.plates import split_rows
+        top, bottom = split_rows(_two_line_plate())
+        self.assertLess(top.shape[0], 100)
+        self.assertLess(bottom.shape[0], 100)
+        one = np.full((90, 260, 3), 235, np.uint8)
+        cv2.putText(one, "TSK 8104", (15, 62), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (20, 20, 20), 4)
+        self.assertIsNone(split_rows(one))
+        cap = np.full((100, 260, 3), 235, np.uint8)             # one line + small caption underneath
+        cv2.putText(cap, "TSK 8104", (15, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (20, 20, 20), 4)
+        cv2.putText(cap, "BAJWA", (80, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20, 20, 20), 2)
+        self.assertIsNone(split_rows(cap))
+
+    def test_compose_takes_letters_from_top_and_number_from_bottom(self):
+        from gatevision.plates import compose_two_line
+        self.assertEqual(compose_two_line("MNF17", "811"), "MNF811")
+        self.assertEqual(compose_two_line("MNE·16", "254"), "MNE254")
+        self.assertEqual(compose_two_line("LED14", "9"), "LED9")
+        self.assertEqual(compose_two_line("MNF1", "811"), "MNF811")     # year only half read
+        self.assertEqual(compose_two_line("MNFI7", "811"), "MNF811")    # year digit read as a letter
+        self.assertEqual(compose_two_line("LEA", "5989"), "LEA5989")    # no year on the plate
+        self.assertIsNone(compose_two_line("17", "811"))          # no letters on top
+        self.assertIsNone(compose_two_line("MNF17", "ABC"))       # no digits below
+
+    def test_reader_reads_the_rows_separately_so_the_year_never_mixes_into_the_number(self):
+        import types
+        import numpy as np
+        from gatevision.plates import PlateReader, vote
+        plate = _two_line_plate()
+        frame = np.full((300, 400, 3), 90, np.uint8)
+        frame[40:40 + plate.shape[0], 60:60 + plate.shape[1]] = plate
+
+        class Ocr:
+            n = 0
+
+            def predict(self, img):
+                Ocr.n += 1                                       # rows come top, bottom, top, bottom ...
+                text = "MNF17" if Ocr.n % 2 == 1 else "811"
+                return types.SimpleNamespace(text=text, confidence=0.9)
+
+        class Alpr:
+            ocr = Ocr()
+
+            def predict(self, img):
+                bb = types.SimpleNamespace(x1=60, y1=40, x2=60 + plate.shape[1], y2=40 + plate.shape[0])
+                det = types.SimpleNamespace(bounding_box=bb, confidence=0.9)
+                return [types.SimpleNamespace(detection=det, ocr=types.SimpleNamespace(text="MNF1811", confidence=0.5))]
+
+        reader = PlateReader.__new__(PlateReader)
+        reader.alpr = Alpr()
+        reads = reader.read(frame)
+        self.assertEqual({r.text for r in reads}, {"MNF811"})    # the mixed-up "MNF1811" never appears
+        self.assertEqual(vote(reads)[0], "MNF811")

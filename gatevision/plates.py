@@ -65,6 +65,69 @@ def crop_variants(plate):
         yield f"rot{ang}", cv2.warpAffine(base, m, (bw, bh), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
 
 
+def split_rows(plate):
+    """Split a two-line plate (letters + small year on top, big number below) into
+    its two rows. Returns (top, bottom) pictures, or None for one-line plates.
+
+    Works from where the ink is: a clear empty gap near the middle with two
+    text bands of similar height. A one-line plate with a small city / name
+    line underneath has bands of very different height and is NOT split.
+    """
+    h, w = plate.shape[:2]
+    if h < 24 or w < 40:
+        return None
+    gray = cv2.cvtColor(plate, cv2.COLOR_BGR2GRAY) if plate.ndim == 3 else plate
+    x0, x1 = int(w * 0.18), int(w * 0.97)            # skip the green emblem strip on the left
+    y0, y1 = int(h * 0.08), int(h * 0.92)            # skip the plate frame
+    region = gray[y0:y1, x0:x1]
+    if region.size == 0:
+        return None
+    region = cv2.GaussianBlur(cv2.createCLAHE(clipLimit=2.0, tileGridSize=(2, 2)).apply(region), (3, 3), 0)
+    t, _ = cv2.threshold(region, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    dark = region < t
+    ink = dark if dark.mean() < 0.5 else ~dark       # the smaller side is the writing
+    prof = ink.mean(axis=1)
+    k = max(3, len(prof) // 25)
+    prof = np.convolve(prof, np.ones(k) / k, mode="same")
+    n = len(prof)
+    lo, hi = int(n * 0.30), int(n * 0.70)
+    if hi <= lo:
+        return None
+    cut = lo + int(np.argmin(prof[lo:hi]))
+    top_peak, bot_peak = float(prof[:cut].max()), float(prof[cut:].max())
+    if min(top_peak, bot_peak) < 0.10 or prof[cut] > 0.50 * min(top_peak, bot_peak):
+        return None                                   # no clear empty gap between two text rows
+
+    def band_height(seg):
+        rows = np.where(seg > 0.35 * seg.max())[0]
+        return (rows[-1] - rows[0] + 1) if len(rows) else 0
+    ht, hb = band_height(prof[:cut]), band_height(prof[cut:])
+    if min(ht, hb) < 0.55 * max(ht, hb) or min(ht, hb) < 0.12 * n:
+        return None                                   # unequal rows: one-line plate with a small caption
+    cut_abs = y0 + cut
+    pad = max(2, int(h * 0.04))
+    return plate[: min(h, cut_abs + pad)], plate[max(0, cut_abs - pad):]
+
+
+def compose_two_line(top_text: str, bottom_text: str):
+    """Letters from the top row (the small year is skipped) + digits from the bottom row.
+    Returns the plate text, or None if the two rows do not look like a plate."""
+    top = re.sub(r"[^A-Z0-9]", "", (top_text or "").upper())
+    bot = re.sub(r"[^A-Z0-9]", "", (bottom_text or "").upper())
+    if len(top) < 2 or not bot:
+        return None
+    m = re.match(r"^(.*?)(\d{1,2})$", top)               # MNF17 / MNF1 -> MNF (year skipped, even half-read)
+    if m and len(m.group(1)) >= 2:
+        top = m.group(1)
+    if len(top) == 4 and top[-1] in _TO_DIGIT:         # MNFI = MNF + a year digit read as a letter
+        top = top[:3]
+    letters = "".join(_TO_LETTER.get(ch, ch) for ch in top)
+    digits = "".join(_TO_DIGIT.get(ch, ch) for ch in bot)
+    if not re.fullmatch(r"[A-Z]{2,4}", letters) or not re.fullmatch(r"\d{1,4}", digits):
+        return None
+    return letters + digits
+
+
 _YEAR_NUMBER = re.compile(r"^([A-Z]{2,4})(\d{2})(\d{3,4})$")
 _YEAR_ONLY = re.compile(r"^([A-Z]{2,4})(\d{2})$")
 
@@ -157,6 +220,11 @@ class PlateReader:
             bb = r.detection.bounding_box
             box = (int(bb.x1), int(bb.y1), int(bb.x2), int(bb.y2))
             det_conf = float(getattr(r.detection, "confidence", 0.0) or 0.0)
+            if det_conf >= 0.35:
+                two = self._two_line(self._crop(bgr, box))
+                if two:                      # two-line plate read row by row: letters + number, year skipped
+                    out.append(PlateRead(two[0], "two-line", two[1], True, box, det_conf))
+                    continue
             ocr = getattr(r, "ocr", None)
             if ocr is None or not getattr(ocr, "text", None):
                 out.append(PlateRead("", "", 0.0, False, box, det_conf))
@@ -176,30 +244,59 @@ class PlateReader:
                     out.extend(self._extra_reads(bgr, r.box, r.det_conf))
         return out
 
-    def _extra_reads(self, bgr, box, det_conf) -> list[PlateRead]:
-        """Run only the OCR again on rotated / enlarged / top-line versions of the plate."""
-        ocr_model = getattr(self.alpr, "ocr", None)
-        if ocr_model is None:
-            return []
+    @staticmethod
+    def _crop(bgr, box, pad=0.08):
         x1, y1, x2, y2 = box
         h, w = bgr.shape[:2]
-        px, py = int((x2 - x1) * 0.08), int((y2 - y1) * 0.08)
-        crop = bgr[max(0, y1 - py):min(h, y2 + py), max(0, x1 - px):min(w, x2 + px)]
+        px, py = int((x2 - x1) * pad), int((y2 - y1) * pad)
+        return bgr[max(0, y1 - py):min(h, y2 + py), max(0, x1 - px):min(w, x2 + px)]
+
+    def _ocr_raw(self, img):
+        """(raw text, confidence) from the plate reader for one picture, or ("", 0)."""
+        ocr_model = getattr(self.alpr, "ocr", None)
+        if ocr_model is None:
+            return "", 0.0
+        try:
+            o = ocr_model.predict(img)
+        except Exception:
+            return "", 0.0
+        if o is None or not getattr(o, "text", None):
+            return "", 0.0
+        conf = getattr(o, "confidence", 0.0)
+        if isinstance(conf, (list, tuple, np.ndarray)):
+            conf = float(np.mean(conf)) if len(conf) else 0.0
+        return o.text, float(conf)
+
+    def _two_line(self, plate_img):
+        """Read a two-line plate row by row: (text, conf) or None if it is not one / unreadable."""
+        rows = split_rows(plate_img)
+        if rows is None:
+            return None
+        top_text, top_conf = self._ocr_raw(rows[0])
+        bot_text, bot_conf = self._ocr_raw(rows[1])
+        text = compose_two_line(top_text, bot_text)
+        if not text:
+            return None
+        return text, min(top_conf, bot_conf)
+
+    def _extra_reads(self, bgr, box, det_conf) -> list[PlateRead]:
+        """Run only the OCR again on rotated / enlarged / top-line versions of the plate."""
+        if getattr(self.alpr, "ocr", None) is None:
+            return []
+        crop = self._crop(bgr, box)
         out: list[PlateRead] = []
         for _name, img in crop_variants(crop):
-            try:
-                o = ocr_model.predict(img)
-            except Exception:
+            two = self._two_line(img)
+            if two:
+                out.append(PlateRead(two[0], "two-line", two[1], True, box, det_conf))
                 continue
-            if o is None or not getattr(o, "text", None):
+            raw, conf = self._ocr_raw(img)
+            if not raw:
                 continue
-            conf = getattr(o, "confidence", 0.0)
-            if isinstance(conf, (list, tuple, np.ndarray)):
-                conf = float(np.mean(conf)) if len(conf) else 0.0
-            text, valid = correct_pk_plate(o.text)
+            text, valid = correct_pk_plate(raw)
             text = drop_year(text)
             if len(text) >= 3 and valid:
-                out.append(PlateRead(text, o.text, float(conf), valid, box, det_conf))
+                out.append(PlateRead(text, raw, conf, valid, box, det_conf))
         return out
 
     def read_robust(self, bgr) -> list[PlateRead]:
