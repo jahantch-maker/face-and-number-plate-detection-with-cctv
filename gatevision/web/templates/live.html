@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% from "_card.html" import card %}
+{% block title %}Live · Gate Vision{% endblock %}
+{% block body %}
+<p class="count"><span class="pulse"></span> Live – newest first, updates every few seconds</p>
+<div class="grid" id="live">
+  {% for r in rows %}{{ card(r) }}{% else %}<p class="muted" id="empty">Waiting for the first event…</p>{% endfor %}
+</div>
+<script>
+let lastId = {{ last_id }};
+const grid = document.getElementById('live');
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function chip(color, label) { const c = el('span', 'chip'); const i = el('i', 'sw ' + color); c.append(i, label); return c; }
+function build(r) {
+  const a = el('a', 'card');
+  const th = el('div', 'thumb');
+  const img = r.kind === 'vehicle' ? r.crop_path : (r.face_path || r.crop_path);
+  if (img) { const im = el('img'); im.src = img; th.append(im); }
+  th.append(el('span', 'dir ' + r.direction, r.direction));
+  if (r.kind === 'vehicle' && r.plate_path) { const p = el('img', 'plateimg'); p.src = r.plate_path; th.append(p); }
+  const m = el('div', 'meta'), chips = el('div', 'chips');
+  if (r.kind === 'vehicle') {
+    m.append(el('div', 'plate' + (r.plate_text ? '' : ' none'), r.plate_text || 'plate not read'));
+    if (r.color) chips.append(chip(r.color, r.color));
+    if (r.vehicle_type) chips.append(el('span', 'chip', r.vehicle_type));
+  } else {
+    m.append(el('div', 'plate person', 'Person'));
+    if (r.upper_color) chips.append(chip(r.upper_color, 'top ' + r.upper_color));
+    if (r.lower_color) chips.append(chip(r.lower_color, 'bottom ' + r.lower_color));
+  }
+  m.append(chips, el('div', 'sub', r.ts_text + ' · ' + r.camera_name));
+  a.append(th, m);
+  return a;
+}
+async function poll() {
+  try {
+    const res = await fetch('/api/events?after_id=' + lastId, {credentials: 'same-origin'});
+    if (res.status === 401) { location.href = '/login'; return; }
+    const data = await res.json();
+    if (data.events.length) {
+      const empty = document.getElementById('empty'); if (empty) empty.remove();
+      data.events.slice().reverse().forEach(r => { grid.prepend(build(r)); lastId = Math.max(lastId, r.id); });
+      while (grid.children.length > 60) grid.lastElementChild.remove();
+    }
+  } catch (e) { /* network hiccup: try again next tick */ }
+}
+setInterval(poll, 3000);
+</script>
+{% endblock %}

@@ -1,0 +1,26 @@
+{% macro card(r) %}
+<a class="card" {% if session.role in ('admin','manager') %}href="{{ url_for('event', event_id=r.id) }}"{% endif %}>
+  <div class="thumb">
+    {% set img = r.crop_path if r.kind == 'vehicle' else (r.face_path or r.crop_path) %}
+    {% if img %}<img src="{{ img|media }}" loading="lazy" alt="">{% endif %}
+    <span class="dir {{ r.direction }}">{{ r.direction }}</span>
+    {% if r.kind == 'vehicle' and r.plate_path %}<img class="plateimg" src="{{ r.plate_path|media }}" alt="">{% endif %}
+  </div>
+  <div class="meta">
+    {% if r.kind == 'vehicle' %}
+      <div class="plate {{ '' if r.plate_text else 'none' }}">{{ r.plate_text or 'plate not read' }}</div>
+      <div class="chips">
+        {% if r.color %}<span class="chip"><i class="sw {{ r.color }}"></i>{{ r.color }}</span>{% endif %}
+        {% if r.vehicle_type %}<span class="chip">{{ r.vehicle_type }}</span>{% endif %}
+      </div>
+    {% else %}
+      <div class="plate person">Person</div>
+      <div class="chips">
+        {% if r.upper_color %}<span class="chip" title="top"><i class="sw {{ r.upper_color }}"></i>top {{ r.upper_color }}</span>{% endif %}
+        {% if r.lower_color %}<span class="chip" title="bottom"><i class="sw {{ r.lower_color }}"></i>bottom {{ r.lower_color }}</span>{% endif %}
+      </div>
+    {% endif %}
+    <div class="sub">{{ r.ts_text }} · {{ r.camera_name }}</div>
+  </div>
+</a>
+{% endmacro %}

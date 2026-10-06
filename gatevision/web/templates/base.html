@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Gate Vision{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+{% if session.user %}
+<header class="top">
+  <strong class="brand">Gate Vision</strong>
+  <nav>
+    {% if session.role in ('admin','manager') %}
+      <a href="{{ url_for('search') }}" class="{{ 'on' if request.endpoint in ('search','event') }}">Search</a>
+    {% endif %}
+    <a href="{{ url_for('live') }}" class="{{ 'on' if request.endpoint=='live' }}">Live</a>
+    {% if session.role in ('admin','manager') %}
+      <a href="{{ url_for('status') }}" class="{{ 'on' if request.endpoint=='status' }}">Cameras</a>
+    {% endif %}
+  </nav>
+  <form method="post" action="{{ url_for('logout') }}" class="logout">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <span class="who">{{ session.user }}</span>
+    <button class="link">Sign out</button>
+  </form>
+</header>
+{% endif %}
+<main>{% block body %}{% endblock %}</main>
+</body>
+</html>

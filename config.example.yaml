@@ -1,0 +1,49 @@
+# Copy this file to config.yaml and edit.
+# Passwords with special characters must be URL-encoded in the RTSP address
+# (@ -> %40, # -> %23, : -> %3A, / -> %2F).
+
+storage:
+  data_dir: D:/gatevision_data     # photos + database live here (any big drive)
+  retention_days: 30               # older records and photos are deleted automatically
+  save_full_frame: true            # keep the whole camera picture as evidence
+
+web:
+  port: 8080
+
+# One entry per camera.
+#   role: plate -> reads number plates of vehicles
+#   role: face  -> saves face + clothing colours of people
+#   direction: IN or OUT (the gate side this camera watches)
+#   url: use the MAIN stream (subtype=0) for best plate/face quality
+#   roi: optional [x1, y1, x2, y2] as fractions of the picture (0..1). Only
+#        objects whose feet/wheels are inside this box are counted. Use it to
+#        ignore the public road behind the barrier.
+cameras:
+  - id: in_plate
+    name: "RG Barrier IN 1"
+    gate: main
+    direction: IN
+    role: plate
+    url: "rtsp://viewer:PASSWORD@192.168.1.101:554/cam/realmonitor?channel=1&subtype=0"
+    roi: [0.0, 0.25, 1.0, 1.0]
+
+  - id: in_face
+    name: "RG Barrier IN 2 (face)"
+    gate: main
+    direction: IN
+    role: face
+    url: "rtsp://viewer:PASSWORD@192.168.1.102:554/cam/realmonitor?channel=1&subtype=0"
+
+  - id: out_plate
+    name: "RG Barrier OUT 1"
+    gate: main
+    direction: OUT
+    role: plate
+    url: "rtsp://viewer:PASSWORD@192.168.1.103:554/cam/realmonitor?channel=1&subtype=0"
+
+  - id: out_face
+    name: "RG Barrier OUT 2 (face)"
+    gate: main
+    direction: OUT
+    role: face
+    url: "rtsp://viewer:PASSWORD@192.168.1.104:554/cam/realmonitor?channel=1&subtype=0"

@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Event {{ e.id }} · Gate Vision{% endblock %}
+{% block body %}
+<p><a href="javascript:history.back()">← Back to results</a></p>
+<div class="detail">
+  <div class="panel">
+    <h2>{{ e.plate_text or ('Person' if e.kind == 'person' else 'Vehicle – plate not read') }}
+      <span class="dir {{ e.direction }}">{{ e.direction }}</span></h2>
+    <table class="kv">
+      <tr><th>Time</th><td>{{ e.ts_text }}</td></tr>
+      <tr><th>Camera</th><td>{{ e.camera_name }}</td></tr>
+      {% if e.kind == 'vehicle' %}
+        <tr><th>Vehicle</th><td>{{ e.vehicle_type or '–' }}, {{ e.color or 'colour unknown' }}</td></tr>
+        <tr><th>Plate confidence</th><td>{{ '%.0f%%' % (e.plate_conf * 100) if e.plate_conf else '–' }}</td></tr>
+      {% else %}
+        <tr><th>Clothing</th><td>top {{ e.upper_color or '–' }}, bottom {{ e.lower_color or '–' }}</td></tr>
+      {% endif %}
+    </table>
+    <p>
+      {% if e.plate_norm %}<a class="btn" href="{{ url_for('search', plate=e.plate_norm, fuzzy=1, kind='vehicle', ts_from='2000-01-01T00:00') }}">All visits of this plate (similar)</a>{% endif %}
+      <a class="btn" href="{{ url_for('search', kind='', ts_from=local(window[0]), ts_to=local(window[1])) }}">Everything within ±2 min</a>
+    </p>
+    <p class="muted">To watch the video, open the NVR playback for <strong>{{ e.camera_name }}</strong> at <strong>{{ e.ts_text }}</strong>.</p>
+  </div>
+  <div class="shots">
+    {% for label, p in (('Full frame', e.full_path), ('Crop', e.crop_path), ('Plate', e.plate_path), ('Face', e.face_path)) %}
+      {% if p %}<figure><a href="{{ p|media }}" target="_blank"><img src="{{ p|media }}" alt="{{ label }}"></a><figcaption>{{ label }}</figcaption></figure>{% endif %}
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Sign in · Gate Vision{% endblock %}
+{% block body %}
+<form method="post" class="login panel">
+  <h1>Gate Vision</h1>
+  <p class="muted">Sign in to view gate records.</p>
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <label>Username <input name="username" autocomplete="username" autofocus required></label>
+  <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+  <button class="primary">Sign in</button>
+</form>
+{% endblock %}

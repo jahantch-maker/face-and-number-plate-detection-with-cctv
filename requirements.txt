@@ -1,0 +1,9 @@
+# Install PyTorch FIRST using the command from https://pytorch.org (choose
+# Windows / Pip / CUDA) so that the NVIDIA GPU is used. Then:
+ultralytics>=8.3
+fast-alpr[onnx-gpu]     # use fast-alpr[onnx] if you have no NVIDIA GPU
+opencv-python>=4.9
+numpy
+flask>=3
+waitress
+pyyaml

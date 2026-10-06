@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% from "_card.html" import card %}
+{% block title %}Search · Gate Vision{% endblock %}
+{% macro sel(name, options, current, label) %}
+<label>{{ label }}
+  <select name="{{ name }}"><option value="">Any</option>
+  {% for o in options %}<option value="{{ o }}" {{ 'selected' if o == current }}>{{ o }}</option>{% endfor %}
+  </select></label>
+{% endmacro %}
+{% block body %}
+<form method="get" class="filters panel">
+  <input type="hidden" name="submitted" value="1">
+  <label class="wide">Number plate
+    <input name="plate" value="{{ f.plate }}" placeholder="e.g. ASY 3549 or just 3549" autocomplete="off">
+  </label>
+  <label class="check"><input type="checkbox" name="fuzzy" value="1" {{ 'checked' if f.fuzzy }}> Similar plates (tolerate OCR mistakes)</label>
+  <label>Type
+    <select name="kind">
+      <option value="">Vehicles &amp; people</option>
+      <option value="vehicle" {{ 'selected' if f.kind=='vehicle' }}>Vehicles</option>
+      <option value="person" {{ 'selected' if f.kind=='person' }}>People</option>
+    </select></label>
+  <label>Direction
+    <select name="direction"><option value="">IN &amp; OUT</option>
+      <option {{ 'selected' if f.direction=='IN' }}>IN</option><option {{ 'selected' if f.direction=='OUT' }}>OUT</option></select></label>
+  <label>Camera
+    <select name="camera_id"><option value="">All</option>
+    {% for c in cameras %}<option value="{{ c.id }}" {{ 'selected' if c.id==f.camera_id }}>{{ c.name }}</option>{% endfor %}
+    </select></label>
+  {{ sel('vehicle_type', vehicle_types, f.vehicle_type, 'Vehicle type') }}
+  {{ sel('color', COLOR_NAMES, f.color, 'Vehicle colour') }}
+  {{ sel('upper_color', COLOR_NAMES, f.upper_color, 'Person top colour') }}
+  {{ sel('lower_color', COLOR_NAMES, f.lower_color, 'Person bottom colour') }}
+  <label>From <input type="datetime-local" name="ts_from" value="{{ f.ts_from }}"></label>
+  <label>To <input type="datetime-local" name="ts_to" value="{{ f.ts_to }}"></label>
+  <div class="actions">
+    <button class="primary">Search</button>
+    <a class="btn" href="{{ url_for('search') }}">Reset (last 24 h)</a>
+  </div>
+</form>
+
+<p class="count"><strong>{{ total }}</strong> result{{ '' if total == 1 else 's' }}{% if pages > 1 %} · page {{ page }} of {{ pages }}{% endif %}</p>
+<div class="grid">
+  {% for r in rows %}{{ card(r) }}{% else %}<p class="muted">Nothing matches these filters.</p>{% endfor %}
+</div>
+{% if pages > 1 %}
+<div class="pager">
+  {% if page > 1 %}<a class="btn" href="{{ url_for('search', page=page-1, **args) }}">← Newer</a>{% endif %}
+  {% if page < pages %}<a class="btn" href="{{ url_for('search', page=page+1, **args) }}">Older →</a>{% endif %}
+</div>
+{% endif %}
+{% endblock %}
