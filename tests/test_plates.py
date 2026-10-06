@@ -1,6 +1,6 @@
 import unittest
 
-from gatevision.plates import PlateRead, correct_pk_plate, pretty, vote
+from gatevision.plates import PlateRead, correct_pk_plate, drop_year, is_year_only, pretty, vote
 
 
 class PlateTests(unittest.TestCase):
@@ -39,7 +39,7 @@ class ExtraOcrTests(unittest.TestCase):
         import numpy as np
         from gatevision.plates import PlateReader, crop_variants, vote
         names = [n for n, _ in crop_variants(np.zeros((60, 150, 3), np.uint8))]
-        self.assertIn("top", names)
+        self.assertNotIn("top", names)      # never cut the number line off
         self.assertIn("rot12", names)
 
         class Ocr:
@@ -64,3 +64,27 @@ class ExtraOcrTests(unittest.TestCase):
         reads = reader.read(np.zeros((100, 200, 3), np.uint8))
         text, share, _ = vote(reads)
         self.assertEqual(text, "TSK8104")
+
+
+class RegistrationYearTests(unittest.TestCase):
+    def test_year_is_dropped_from_letters_year_number(self):
+        self.assertEqual(drop_year("MNC17515"), "MNC515")
+        self.assertEqual(drop_year("LEA175989"), "LEA5989")
+        self.assertEqual(drop_year("LEF123503"), "LEF3503")
+        self.assertEqual(drop_year("ASY3549"), "ASY3549")     # plain plates untouched
+        self.assertEqual(drop_year("LEF1981"), "LEF1981")     # 4 digits: cannot tell, keep
+        self.assertEqual(drop_year("ABC995000"), "ABC995000") # 99 is not a year
+
+    def test_letters_plus_year_only_is_recognised_as_partial(self):
+        self.assertTrue(is_year_only("MNC17"))
+        self.assertFalse(is_year_only("MNC515"))
+        self.assertFalse(is_year_only("DH121"))               # 3 digits = a real number
+
+    def test_vote_prefers_the_full_read_over_letters_plus_year(self):
+        reads = [PlateRead("MNC17", "", 0.9, True)] * 6 + [PlateRead("MNC515", "", 0.7, True)] * 3
+        text, _share, _best = vote(reads)
+        self.assertEqual(text, "MNC515")
+
+    def test_partial_is_kept_when_nothing_better_exists(self):
+        text, _s, _b = vote([PlateRead("MNC17", "", 0.8, True)])
+        self.assertEqual(text, "MNC17")

@@ -50,22 +50,38 @@ def variants(bgr):
 
 
 def crop_variants(plate):
-    """Many looks at ONE plate picture: bigger, slightly rotated (bikes park at
-    an angle), and only the top line (Pakistani plates carry a city / name line
-    underneath that confuses the reader)."""
+    """Many looks at ONE plate picture: bigger, and slightly rotated (bikes park
+    at an angle). The whole plate is always kept - two-line plates carry the
+    number on the bottom line."""
     h, w = plate.shape[:2]
     if h < 8 or w < 8:
         return
     scale = 2.0 if w < 300 else 1.0
     base = cv2.resize(plate, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC) if scale != 1.0 else plate
     bh, bw = base.shape[:2]
-    for name, img in (("full", base), ("top", base[: max(8, int(bh * 0.65))])):
-        yield name, img
+    yield "full", base
     for ang in (-12, -6, 6, 12):
         m = cv2.getRotationMatrix2D((bw / 2, bh / 2), ang, 1.0)
-        rot = cv2.warpAffine(base, m, (bw, bh), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-        yield f"rot{ang}", rot
-        yield f"rot{ang}top", rot[: max(8, int(bh * 0.65))]
+        yield f"rot{ang}", cv2.warpAffine(base, m, (bw, bh), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+
+_YEAR_NUMBER = re.compile(r"^([A-Z]{2,4})(\d{2})(\d{3,4})$")
+_YEAR_ONLY = re.compile(r"^([A-Z]{2,4})(\d{2})$")
+
+
+def drop_year(text: str) -> str:
+    """Punjab/Islamabad plates print a small registration year after the letters
+    (LEA-17-5989). Keep the letters and the big number, skip the year."""
+    m = _YEAR_NUMBER.match(text or "")
+    if m and 0 <= int(m.group(2)) <= 30:
+        return m.group(1) + m.group(3)
+    return text
+
+
+def is_year_only(text: str) -> bool:
+    """'MNC17' = the reader saw only the letters and the small year, not the number."""
+    m = _YEAR_ONLY.match(text or "")
+    return bool(m and 0 <= int(m.group(2)) <= 30)
 
 
 def pretty(text: str) -> str:
@@ -149,6 +165,7 @@ class PlateReader:
             if isinstance(conf, (list, tuple, np.ndarray)):
                 conf = float(np.mean(conf)) if len(conf) else 0.0
             text, valid = correct_pk_plate(ocr.text)
+            text = drop_year(text)
             if len(text) < 3:
                 out.append(PlateRead("", ocr.text, 0.0, False, box, det_conf))
                 continue
@@ -180,6 +197,7 @@ class PlateReader:
             if isinstance(conf, (list, tuple, np.ndarray)):
                 conf = float(np.mean(conf)) if len(conf) else 0.0
             text, valid = correct_pk_plate(o.text)
+            text = drop_year(text)
             if len(text) >= 3 and valid:
                 out.append(PlateRead(text, o.text, float(conf), valid, box, det_conf))
         return out
@@ -202,9 +220,14 @@ def vote(reads: list[PlateRead], min_conf: float = 0.0):
     score: dict[str, float] = defaultdict(float)
     best: dict[str, PlateRead] = {}
     total = 0.0
+    full_prefixes = {re.match(r"[A-Z]+", r.text).group(0) for r in reads
+                     if r.text and not is_year_only(r.text) and re.match(r"[A-Z]+", r.text)}
     for r in reads:
         if r.conf < min_conf:
             continue
+        if is_year_only(r.text) and re.match(r"[A-Z]+", r.text) and \
+                any(p.startswith(re.match(r"[A-Z]+", r.text).group(0)[:2]) for p in full_prefixes):
+            continue                      # saw only letters + year; a fuller read exists
         w = r.conf * (1.6 if r.valid else 0.6)
         score[r.text] += w
         total += w
