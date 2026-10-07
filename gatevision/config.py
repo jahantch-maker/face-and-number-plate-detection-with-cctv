@@ -46,8 +46,8 @@ DEFAULTS = {
         "retrack_seconds": 3,        # same person/vehicle re-detected within this long at the same spot = ONE record
     },
     "enhance": {
-        "faces": True,     # clearer saved face photos (enlarge, denoise, brighten, sharpen - nothing invented)
-        "plates": True,    # same for the saved plate photo, easier for a person to read
+        "faces": False,    # True = process saved face photos (enlarge, denoise, brighten, sharpen). OFF: it distorted faces
+        "plates": False,   # True = same for the saved plate photo
     },
     "web": {
         "host": "0.0.0.0",

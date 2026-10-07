@@ -348,7 +348,11 @@ class DuplicateTests(PipelineTests):
         self.assertEqual(self.db2.search({})[1], 0)
         self.assertGreater(worker2.stats["too far (frames)"], 0)
 
-    def test_saved_face_photo_is_enhanced(self):
+    def test_enhancement_is_off_by_default(self):
+        self.assertFalse(DEFAULTS["enhance"]["faces"])
+        self.assertFalse(DEFAULTS["enhance"]["plates"])
+
+    def test_saved_face_photo_is_enhanced_when_switched_on(self):
         class DarkFaces:
             def detect(self, bgr):
                 h, w = bgr.shape[:2]
@@ -356,7 +360,8 @@ class DuplicateTests(PipelineTests):
         dark = np.full((720, 1280, 3), 30, np.uint8)
         dark[::7] = 10
         near = [[Det(9, "person", 0.9, (380, 100, 540, 700))] for _ in range(20)]
-        worker = CameraWorker(self.cam("face"), self.cfg, FakeDetector(near), self.store, faces=DarkFaces())
+        cfg = _merge(DEFAULTS, {"enhance": {"faces": True}})
+        worker = CameraWorker(self.cam("face"), cfg, FakeDetector(near), self.store, faces=DarkFaces())
         for i in range(20):
             worker.step(dark, 4000 + i / 10)
         worker.step(dark, 4020)
