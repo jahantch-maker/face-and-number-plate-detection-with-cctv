@@ -2,6 +2,7 @@
 
 The YOLO and plate models download themselves the first time the engine runs.
 """
+import gatevision  # noqa: F401  (enables Windows certificate store for HTTPS)
 from pathlib import Path
 from urllib.request import urlretrieve
 

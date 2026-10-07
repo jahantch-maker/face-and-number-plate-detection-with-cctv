@@ -62,7 +62,7 @@ def main():
 
     print("\n== 3/4  Other packages")
     if not pip("install", "ultralytics", "fast-alpr[onnx]", "opencv-python", "numpy",
-               "flask", "waitress", "pyyaml", "truststore"):
+               "flask", "waitress", "pyyaml", "truststore", "lap"):
         raise SystemExit("Package install failed. Check the internet connection and run install.bat again.")
     if not gpu and not cuda_works():
         pass  # ultralytics brought its own CPU torch
