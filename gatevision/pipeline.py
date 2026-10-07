@@ -11,6 +11,8 @@ from collections import Counter, deque
 import cv2
 
 from .colors import clothing_colors, vehicle_color
+from .db import _fuzzy_match, norm_plate
+from .enhance import enhance_face, enhance_plate
 from .plates import pretty, vote
 
 log = logging.getLogger("gatevision.pipeline")
@@ -22,6 +24,22 @@ def _sharpness(bgr) -> float:
     if w > 200:
         g = cv2.resize(g, (200, max(1, int(h * 200 / w))), interpolation=cv2.INTER_AREA)
     return float(cv2.Laplacian(g, cv2.CV_64F).var())
+
+
+def _signature(crop):
+    """Tiny colour fingerprint of a person / vehicle, to tell two different ones apart."""
+    if crop is None or crop.size == 0:
+        return None
+    hsv = cv2.cvtColor(cv2.resize(crop, (32, 32), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2HSV)
+    h = cv2.calcHist([hsv], [0, 1], None, [12, 4], [0, 180, 0, 256])
+    cv2.normalize(h, h, alpha=1.0, norm_type=cv2.NORM_L1)
+    return h
+
+
+def _brightness_ok(bgr) -> float:
+    """1.0 for a well-lit picture, down to 0.3 for a very dark or washed-out one."""
+    mean = float(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).mean())
+    return max(0.3, 1.0 - abs(mean - 120.0) / 160.0)
 
 
 def _clip_crop(frame, box, pad=0.0):
@@ -125,9 +143,12 @@ class CameraWorker:
             if role == "face" and ((y2 - y1) / H < min_h or d.conf < person_conf):
                 self.stats["too far / unsure (frames)"] += 1
                 continue
-            if role == "plate" and (x2 - x1) / W < min_w:
-                self.stats["too far (frames)"] += 1
-                continue
+            if role == "plate":
+                is_bike = d.label in ("motorcycle", "bicycle")
+                need = cam.get("min_bike_width", self.t["min_bike_width"]) if is_bike else min_w
+                if (x2 - x1) / W < need:
+                    self.stats["too far (frames)"] += 1
+                    continue
             st = self.tracks.get(d.track_id)
             if st is None:
                 st = self.tracks[d.track_id] = TrackState(d.track_id, ts)
@@ -160,7 +181,12 @@ class CameraWorker:
         if crop is None:
             return
         area = crop.shape[0] * crop.shape[1]
-        score = _sharpness(crop) * math.sqrt(area) * det.conf
+        H, W = frame.shape[:2]
+        x1, y1, x2, y2 = det.box
+        edge = 0.02
+        inside = 1.0 if (x1 > edge * W and y1 > edge * H and x2 < (1 - edge) * W and y2 < (1 - edge) * H) else 0.6
+        # clearer, bigger, fully in the picture, well lit, and a sure detection
+        score = (1.0 + min(_sharpness(crop), 400.0) / 100.0) * math.sqrt(area) * det.conf * inside * _brightness_ok(crop)
         if score > st.best_score * 1.1:
             st.best_score = score
             st.best_crop = crop.copy()
@@ -196,11 +222,14 @@ class CameraWorker:
                 continue                      # text that does not look like a plate and is not a sure read
             if r.text and r.conf >= self.t["min_plate_conf"]:
                 st.reads.append(r)
-            quality = max(r.det_conf, r.conf)
-            if r.box and quality > st.plate_img_conf:
+            if r.box:
                 pc = _clip_crop(image, r.box, pad=0.15)
                 if pc is not None:
-                    st.plate_img, st.plate_img_conf = pc.copy(), quality
+                    # best plate photo: sure it is a plate, sure of the text, big and sharp
+                    sure = (0.4 + r.det_conf) * (0.5 + r.conf)
+                    quality = sure * math.sqrt(pc.shape[0] * pc.shape[1]) * (1.0 + min(_sharpness(pc), 300.0) / 100.0)
+                    if quality > st.plate_img_conf:
+                        st.plate_img, st.plate_img_conf = pc.copy(), quality
 
     def _find_face(self, st: TrackState, frame, det):
         st.face_attempts += 1
@@ -215,28 +244,39 @@ class CameraWorker:
             fc = _clip_crop(upper, (fx, fy, fx + fw, fy + fh), pad=0.25)
             if fc is None:
                 continue
-            score = sc * fw * fh * (1.0 + _sharpness(fc) / 100.0)
+            score = sc * fw * fh * (1.0 + min(_sharpness(fc), 400.0) / 100.0) * _brightness_ok(fc)
             if score > st.face_score:
                 st.face_score, st.face_img = score, fc.copy()
 
-    def _is_retrack(self, st: TrackState) -> bool:
+    def _is_retrack(self, st: TrackState, sig=None, plate: str = "") -> bool:
         """True if ``st`` is the SAME object as a track recorded moments ago.
 
         That happens when the tracker loses and re-finds someone who is standing
-        still, or when a long stay is split. It is the same object when the new
-        track appears right where the old one ended, within a few seconds, and
-        while the old one was already gone. A different vehicle arriving
-        behind starts at the entrance, not where the last one stood.
+        still, or when a long stay is split. It is the same object only when the
+        new track appears right where the old one ended, within a few seconds,
+        LOOKS alike (colour, size) and does not have a different plate. A second
+        vehicle or person right behind the first one fails these tests, so it
+        is recorded too.
         """
         window = self.t["retrack_seconds"]
         self.recent = [r for r in self.recent if st.first_seen - r[0] < 60]
-        for last_seen, pos in self.recent:
+        for last_seen, pos, old_sig, old_plate in self.recent:
             gap = st.first_seen - last_seen
-            if 0 <= gap <= window and st.first_pos and pos:
-                size = (st.first_pos[2] + pos[2]) / 2
-                dist = math.hypot(st.first_pos[0] - pos[0], st.first_pos[1] - pos[1])
-                if dist < 0.30 * size:
-                    return True
+            if not (0 <= gap <= window and st.first_pos and pos):
+                continue
+            size = (st.first_pos[2] + pos[2]) / 2
+            dist = math.hypot(st.first_pos[0] - pos[0], st.first_pos[1] - pos[1])
+            if dist >= 0.30 * size:
+                continue
+            if plate and old_plate and not _fuzzy_match(norm_plate(plate), norm_plate(old_plate)):
+                continue                                    # two different plates = two vehicles
+            if sig is not None and old_sig is not None and \
+                    cv2.compareHist(sig, old_sig, cv2.HISTCMP_CORREL) < 0.5:
+                continue                                    # different colours = a different one
+            ratio = st.first_pos[2] / max(pos[2], 1e-6)
+            if not (0.6 <= ratio <= 1.7):
+                continue                                    # clearly a different size
+            return True
         return False
 
     def _finalize(self, st: TrackState):
@@ -247,9 +287,11 @@ class CameraWorker:
         if self.t["require_stop"] and not st.was_stopped:
             self.stats["did not stop"] += 1
             return
-        if self._is_retrack(st):
+        sig = _signature(st.best_crop)
+        plate, share, best = vote(st.reads, self.t["min_plate_conf"]) if self.cam["role"] == "plate" else (None, 0.0, None)
+        if self._is_retrack(st, sig, plate or ""):
             self.stats["same one seen again"] += 1
-            self.recent.append((st.last_seen, st.last_pos))     # chain: later re-tracks match this one too
+            self.recent.append((st.last_seen, st.last_pos, sig, plate or ""))   # chain: later re-tracks match this one too
             return
         label = st.labels.most_common(1)[0][0]
         cam = self.cam
@@ -260,7 +302,6 @@ class CameraWorker:
             "track_id": st.id, "extra": {"duration_s": round(dur, 1), "frames": st.frames},
         }
         if cam["role"] == "plate":
-            plate, share, best = vote(st.reads, self.t["min_plate_conf"])
             conf = best.conf * share if best else 0.0          # how sure we are of the final text
             norm = plate or ""
             if norm and self.last_plate.get(norm, -1e9) > ev["ts"] - self.t["dedup_seconds"]:
@@ -274,7 +315,8 @@ class CameraWorker:
                       plate_text=pretty(plate) if plate else None, plate_conf=conf)
             ev["extra"]["plate_reads"] = len(st.reads)
             ev["extra"]["plate_raw"] = best.raw if best else None
-            self.store.save_event(ev, full=st.best_full, crop=st.best_crop, plate=st.plate_img)
+            plate_photo = enhance_plate(st.plate_img) if (st.plate_img is not None and self.cfg.get("enhance", {}).get("plates", True)) else st.plate_img
+            self.store.save_event(ev, full=st.best_full, crop=st.best_crop, plate=plate_photo)
         else:
             if self.cam.get("require_face", self.t["require_face"]) and st.face_img is None:
                 self.stats["no face found"] += 1
@@ -282,8 +324,9 @@ class CameraWorker:
             upper, lower = clothing_colors(st.best_crop)
             ev.update(kind="person", upper_color=upper, lower_color=lower)
             ev["extra"]["has_face"] = st.face_img is not None
-            self.store.save_event(ev, full=st.best_full, crop=st.best_crop, face=st.face_img)
-        self.recent.append((st.last_seen, st.last_pos))
+            face_photo = enhance_face(st.face_img) if (st.face_img is not None and self.cfg.get("enhance", {}).get("faces", True)) else st.face_img
+            self.store.save_event(ev, full=st.best_full, crop=st.best_crop, face=face_photo)
+        self.recent.append((st.last_seen, st.last_pos, sig, plate or ""))
         self.events_saved += 1
         self.stats["SAVED"] += 1
         self.last_event_ts = ev["ts"]

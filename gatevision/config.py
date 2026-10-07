@@ -23,26 +23,31 @@ DEFAULTS = {
         "face_model": "models/face_detection_yunet_2023mar.onnx",
     },
     "tracking": {
-        "process_fps": 15,         # frames per second analysed per camera, 0 = as fast as the PC can (the Cameras page shows what is really achieved)
+        "process_fps": 20,         # frames per second analysed per camera, 0 = as fast as the PC can (the Cameras page shows what is really achieved)
         "lost_seconds": 2.0,       # track is finished when unseen this long
         "min_track_seconds": 0.4,  # ignore flickers shorter than this
         "max_dwell_seconds": 120,  # force-save very long stays
         "stop_motion_ratio": 0.08, # moved < 8% of its size in 1 s => "stopped"
         "require_stop": False,     # capture people/vehicles even while moving (True = only those that stop)
         "ocr_interval": 0.15,      # seconds between plate reads of one vehicle
-        "max_ocr_attempts": 12,
-        "max_face_attempts": 20,
+        "max_ocr_attempts": 24,
+        "max_face_attempts": 30,
         "dedup_seconds": 15,       # same plate on same camera within this = one
         "min_plate_conf": 0.20,      # reads below 0.5 are shown with a "?" so a human checks the photo
         # "Near the camera only" rules. Sizes are fractions of the picture, so
         # they work for any camera resolution. Override per camera with
         # min_height / min_width / require_face / person_conf in config.yaml.
-        "min_person_height": 0.40,   # a person must be at least 40% of the picture height
-        "min_vehicle_width": 0.30,   # a vehicle must be at least 30% of the picture width
+        "min_person_height": 0.33,   # a person must be at least 33% of the picture height (was 40%: 1.2x farther)
+        "min_vehicle_width": 0.25,   # a car / truck / bus must be at least 25% of the picture width (was 30%)
+        "min_bike_width": 0.10,      # a motorcycle / bicycle is narrow: at least 10% of the picture width
         "person_conf": 0.55,         # people detections below this certainty are ignored
         "min_face_px": 50,           # ignore faces narrower than this many pixels
         "require_face": False,       # True = a face camera saves a person only if a face was found (misses people who look away)
-        "retrack_seconds": 4,        # same person/vehicle re-detected within this long at the same spot = ONE record
+        "retrack_seconds": 3,        # same person/vehicle re-detected within this long at the same spot = ONE record
+    },
+    "enhance": {
+        "faces": True,     # clearer saved face photos (enlarge, denoise, brighten, sharpen - nothing invented)
+        "plates": True,    # same for the saved plate photo, easier for a person to read
     },
     "web": {
         "host": "0.0.0.0",

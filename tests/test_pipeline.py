@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from gatevision.config import DEFAULTS, _merge
@@ -313,8 +314,56 @@ class DuplicateTests(PipelineTests):
         for i in range(len(b)):
             worker.step(f, 1000 + (len(a) + len(gap) + i) / 10)
         worker.step(f, 1000 + (len(a) + len(gap) + len(b)) / 10 + 6)
-        # Documented trade-off: indistinguishable from a tracker hiccup, so only ONE record is kept
+        # two different plates are two different vehicles, even at the same spot right after each other
+        self.assertEqual(self.db.search({})[1], 2)
+
+    def test_different_looking_person_right_behind_the_first_is_also_recorded(self):
+        red = np.full((720, 1280, 3), (40, 40, 200), np.uint8)
+        red[::7] = (20, 20, 120)
+        blue = np.full((720, 1280, 3), (200, 60, 40), np.uint8)
+        blue[::7] = (120, 30, 20)
+        a = [[Det(1, "person", 0.9, (380, 100, 520, 700))] for _ in range(15)]
+        b = [[Det(2, "person", 0.9, (380, 100, 520, 700))] for _ in range(15)]
+        worker = CameraWorker(self.cam("face"), self.cfg, FakeDetector(a + [[]] * 3 + b), self.store, faces=FakeFaces())
+        t = 3000.0
+        for i in range(len(a)):
+            worker.step(red, t + i / 10)
+        for i in range(3):
+            worker.step(red, t + (len(a) + i) / 10)
+        for i in range(len(b)):
+            worker.step(blue, t + (len(a) + 3 + i) / 10)
+        worker.step(blue, t + 40)
+        self.assertEqual(self.db.search({})[1], 2)
+
+    def test_narrow_motorcycle_is_accepted_but_a_narrow_car_is_not(self):
+        bike = [[Det(1, "motorcycle", 0.9, (500, 300, 640, 640))] for _ in range(20)]     # 140 px = 11% of width
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(bike), self.store, plates=FakePlates(["ABC123"]))
+        self.run_script(worker, 20)
         self.assertEqual(self.db.search({})[1], 1)
+        car = [[Det(2, "car", 0.9, (500, 300, 640, 640))] for _ in range(20)]
+        self.db2 = Database(self.dir / "t2.db")
+        worker2 = CameraWorker(self.cam(), self.cfg, FakeDetector(car), EventStore(self.dir, self.db2),
+                               plates=FakePlates(["XYZ789"]))
+        self.run_script(worker2, 20)
+        self.assertEqual(self.db2.search({})[1], 0)
+        self.assertGreater(worker2.stats["too far (frames)"], 0)
+
+    def test_saved_face_photo_is_enhanced(self):
+        class DarkFaces:
+            def detect(self, bgr):
+                h, w = bgr.shape[:2]
+                return [(w * 0.3, h * 0.05, w * 0.4, h * 0.3, 0.9)]
+        dark = np.full((720, 1280, 3), 30, np.uint8)
+        dark[::7] = 10
+        near = [[Det(9, "person", 0.9, (380, 100, 540, 700))] for _ in range(20)]
+        worker = CameraWorker(self.cam("face"), self.cfg, FakeDetector(near), self.store, faces=DarkFaces())
+        for i in range(20):
+            worker.step(dark, 4000 + i / 10)
+        worker.step(dark, 4020)
+        row = self.db.search({})[0][0]
+        face = cv2.imread(str(self.dir / row["face_path"]))
+        self.assertGreater(face.mean(), 60)                 # brightened from ~30
+        self.assertGreaterEqual(face.shape[1], 200)         # enlarged
 
 
 class PlateRobustnessTests(PipelineTests):

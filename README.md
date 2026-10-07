@@ -99,6 +99,7 @@ Do **not** forward a router port to this PC. Install **Tailscale** (free) on the
 | Problem | Setting |
 | --- | --- |
 | Far-away people/cars/trees are logged | raise `min_person_height` (0.40 -> 0.55) or `min_vehicle_width` (0.30 -> 0.40); per camera: `min_height`, `min_width` |
+| Saved face / plate photos look too dull | they are enhanced automatically (set `enhance: {faces: false}` in config.yaml to turn off) |
 | Real people near the camera are missed | lower `min_person_height`, or set `require_face: false` on that camera |
 | Cars on the public road behind the barrier are logged | give that camera a `roi` (box on the lower part of the picture) |
 | Vehicles are skipped because they barely pause | raise `stop_motion_ratio` (0.08 -> 0.15) |
