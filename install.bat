@@ -16,6 +16,17 @@ if errorlevel 1 (
     start "" cmd /c "%~f0"
     exit /b 0
   )
+  echo  winget not found ^(normal on Windows Server^). Downloading Python from python.org...
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe -OutFile $env:TEMP\py312.exe; Invoke-WebRequest https://aka.ms/vs/17/release/vc_redist.x64.exe -OutFile $env:TEMP\vcredist.exe"
+  if exist "%TEMP%\py312.exe" (
+    "%TEMP%\vcredist.exe" /install /quiet /norestart
+    "%TEMP%\py312.exe" /quiet InstallAllUsers=1 PrependPath=1 Include_test=0
+    echo.
+    echo  Python installed. Restarting this installer so it can see Python...
+    timeout /t 3 /nobreak >nul
+    start "" cmd /c "%~f0"
+    exit /b 0
+  )
   echo  Automatic install is not available on this PC.
   echo  The download page will open. Install Python 3.12 and TICK "Add python.exe to PATH",
   echo  then double-click install.bat again.
@@ -34,6 +45,8 @@ if errorlevel 1 ( echo. & echo  Install failed - see the message above. & pause 
 echo.
 net session >nul 2>nul
 if not errorlevel 1 (
+  echo  Opening port 8080 in Windows Firewall so phones and PCs can reach Gate Vision...
+  netsh advfirewall firewall add rule name="Gate Vision" dir=in action=allow protocol=TCP localport=8080 profile=any >nul
   echo  Setting up automatic start with Windows...
   call install_autostart.bat
 ) else (
