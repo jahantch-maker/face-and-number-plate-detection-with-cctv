@@ -27,6 +27,19 @@ Cameras --RTSP--> run_engine.py --> database + photos (D:\gatevision_data)
 4. Double-click **`start_all.bat`**, then open http://localhost:8080.
 5. When happy, right-click **`install_autostart.bat`** and *Run as administrator* so it starts after power cuts.
 
+## Updating to the latest version (one click)
+
+Every improvement is published on GitHub. To get it on the gate PC / server, double-click **`update.bat`**.
+It checks GitHub, stops Gate Vision, downloads the new version, replaces the program files, installs any
+new packages, restarts everything and opens the browser. Internet access is needed; Git is **not**.
+
+* Your `config.yaml`, `data\`, `models\`, `.venv\`, logs and `*.pt` models are never touched.
+* The old version is saved in `_backup\` (last 5 kept). Something wrong? Run `update.bat --rollback`.
+* `update.bat --force` re-applies the latest version; `update.bat --deps` re-runs the package installer;
+  `update.bat --zip file.zip` updates from a zip you downloaded by hand (no internet on the server).
+* First time only: copy `update.bat` and `update.py` into the install folder once. After that the updater updates itself
+  (except `update.bat`, which is tiny and rarely changes).
+
 The detailed manual steps are below for reference.
 
 ## 1. Recommended PC

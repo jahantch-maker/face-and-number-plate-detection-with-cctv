@@ -33,19 +33,30 @@ def cuda_works() -> bool:
     return run([sys.executable, "-c", code], quiet=True)
 
 
+def torch_importable() -> bool:
+    return run([sys.executable, "-c", "import torch"], quiet=True)
+
+
 def main():
+    update = "--update" in sys.argv   # called by update.bat: keep PyTorch as is
     if sys.version_info < (3, 9):
         raise SystemExit("Python is too old. Please install Python 3.12 from python.org.")
     if sys.version_info >= (3, 13):
         print("NOTE: Python %d.%d detected. If a package fails to install, "
               "install Python 3.12 instead and run install.bat again.\n" % sys.version_info[:2])
 
-    print("== 1/4  Updating installer tools")
-    pip("install", "--upgrade", "pip")
+    if update:
+        print("== Update mode: keeping the installed PyTorch, adding any missing packages")
+    else:
+        print("== 1/4  Updating installer tools")
+        pip("install", "--upgrade", "pip")
 
     print("\n== 2/4  PyTorch (AI engine)")
     gpu = False
-    if has_nvidia():
+    if update and torch_importable():
+        print("PyTorch already installed - skipping.")
+        gpu = cuda_works()
+    elif has_nvidia():
         print("NVIDIA graphics card found - installing the GPU version.")
         for tag in CUDA_TAGS:
             print(f"  trying {tag} ...")
@@ -79,7 +90,8 @@ def main():
         print("WARNING: could not pre-download all models. They will download on first run "
               "(internet needed then).")
 
-    open("gpu_mode.txt", "w").write("gpu" if gpu else "cpu")
+    if not update:
+        open("gpu_mode.txt", "w").write("gpu" if gpu else "cpu")
     print("\nInstall finished. Mode:", "GPU" if gpu else "CPU")
 
 
