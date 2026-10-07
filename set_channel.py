@@ -15,7 +15,7 @@ import yaml
 
 PATH = Path("config.yaml")
 if not PATH.exists():
-    sys.exit("config.yaml not found - run this from the C:\\gate-vision folder.")
+    sys.exit("config.yaml not found - run this from the Gate Vision folder.")
 print("Reading:", PATH.resolve(), "\n")
 cfg = yaml.safe_load(PATH.read_text(encoding="utf-8")) or {}
 cams = cfg.get("cameras", [])

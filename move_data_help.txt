@@ -1,8 +1,0 @@
-MOVING YOUR LAPTOP DATA TO THE SERVER
-1. On the laptop: stop Gate Vision (close the two minimised windows).
-2. On the laptop open C:\gate-vision and copy these two items to a USB stick / network share:
-      the folder   data
-      the file     config.yaml
-3. On the server, AFTER install.bat has finished: stop Gate Vision, then paste both into C:\gate-vision
-   (say Yes to replace). Open config.yaml in Notepad and check the NVR address (rtsp host) is still reachable
-   from the server. Then run start_all.bat.
