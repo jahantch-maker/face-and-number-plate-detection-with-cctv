@@ -10,4 +10,12 @@ os.environ.setdefault(
     "OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|stimeout;5000000"
 )
 
+# Servers often lack some root certificates (or sit behind a firewall that
+# re-signs HTTPS): use the Windows certificate store so model downloads work.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+
 __version__ = "0.1.0"
