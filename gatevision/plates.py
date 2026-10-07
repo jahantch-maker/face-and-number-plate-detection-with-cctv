@@ -303,7 +303,11 @@ class PlateReader:
         """Read the picture in several colour-corrected versions."""
         out: list[PlateRead] = []
         for _name, img in variants(bgr):
-            out.extend(self.read(img))
+            reads = self.read(img)
+            out.extend(reads)
+            # a clear, plate-shaped, confident read: the other colour versions would only cost time
+            if any(r.text and r.valid and r.conf >= 0.9 and r.det_conf >= 0.5 for r in reads):
+                break
         return out
 
 

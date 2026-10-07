@@ -103,6 +103,16 @@ class WebTests(unittest.TestCase):
         self.assertIn("online", html)
         self.assertIn("5.5", html)
 
+    def test_status_page_shows_why_records_were_skipped(self):
+        import json
+        skips = json.dumps({"since": time.time(), "counts": {"no face found": 7, "SAVED": 2}})
+        self.db.update_camera_status("c1", "RG Barrier IN 1", "plate", "IN", time.time(), None, 5.5, skips=skips)
+        c = self.app.test_client()
+        self.login(c, "boss")
+        html = c.get("/status").get_data(as_text=True)
+        self.assertIn("SAVED: <b>2</b>", html)
+        self.assertIn("no face found: <b>7</b>", html)
+
     def test_logout_needs_csrf(self):
         c = self.app.test_client()
         self.login(c, "boss")

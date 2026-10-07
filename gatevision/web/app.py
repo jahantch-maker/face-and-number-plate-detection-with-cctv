@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import functools
 import secrets
+import json
 import time
 from pathlib import Path
 
@@ -172,6 +173,11 @@ def create_app(cfg: dict, db: Database | None = None) -> Flask:
             d = dict(s)
             d["online"] = bool(d["last_frame"]) and now - d["last_frame"] < 30 and now - d["updated"] < 45
             d["age"] = int(now - d["last_frame"]) if d["last_frame"] else None
+            try:
+                counts = json.loads(d.get("skips") or "{}").get("counts", {})
+            except ValueError:
+                counts = {}
+            d["skip_counts"] = sorted(counts.items(), key=lambda kv: (kv[0] != "SAVED", -kv[1]))
             rows.append(d)
         return render_template("status.html", rows=rows)
 

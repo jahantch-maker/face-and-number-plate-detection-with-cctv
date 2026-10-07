@@ -41,7 +41,7 @@ DEFAULTS = {
         "min_vehicle_width": 0.30,   # a vehicle must be at least 30% of the picture width
         "person_conf": 0.55,         # people detections below this certainty are ignored
         "min_face_px": 50,           # ignore faces narrower than this many pixels
-        "require_face": True,        # face cameras save a person only if a face was found
+        "require_face": False,       # True = a face camera saves a person only if a face was found (misses people who look away)
         "retrack_seconds": 4,        # same person/vehicle re-detected within this long at the same spot = ONE record
     },
     "web": {

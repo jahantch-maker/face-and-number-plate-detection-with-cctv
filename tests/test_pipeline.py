@@ -168,12 +168,15 @@ class PipelineTests(unittest.TestCase):
             def detect(self, bgr):
                 return []
         near = [[Det(5, "person", 0.9, (380, 300, 540, 640))] for _ in range(20)]
-        worker = CameraWorker(self.cam("face"), self.cfg, FakeDetector(near), self.store, faces=NoFaces())
+        cam_strict = self.cam("face")
+        cam_strict["require_face"] = True
+        worker = CameraWorker(cam_strict, self.cfg, FakeDetector(near), self.store, faces=NoFaces())
         f = frame()
         for i in range(20):
             worker.step(f, 2000 + i / 6)
         worker.step(f, 2020)
         self.assertEqual(self.db.search({})[1], 0)
+        self.assertEqual(worker.stats["no face found"], 1)        # ... and the reason is counted
         # ... but a camera can opt out of the rule
         cam = self.cam("face")
         cam["require_face"] = False
@@ -188,12 +191,36 @@ class PipelineTests(unittest.TestCase):
             def detect(self, bgr):
                 return [(10.0, 10.0, 30.0, 30.0, 0.95)]      # 30 px wide < 50 px
         near = [[Det(6, "person", 0.9, (380, 300, 540, 640))] for _ in range(20)]
-        worker = CameraWorker(self.cam("face"), self.cfg, FakeDetector(near), self.store, faces=TinyFace())
+        cam_strict = self.cam("face")
+        cam_strict["require_face"] = True
+        worker = CameraWorker(cam_strict, self.cfg, FakeDetector(near), self.store, faces=TinyFace())
         f = frame()
         for i in range(20):
             worker.step(f, 2000 + i / 6)
         worker.step(f, 2020)
         self.assertEqual(self.db.search({})[1], 0)
+
+    def test_person_without_face_is_saved_by_default(self):
+        class NoFaces:
+            def detect(self, bgr):
+                return []
+        near = [[Det(7, "person", 0.9, (380, 300, 540, 640))] for _ in range(20)]
+        worker = CameraWorker(self.cam("face"), self.cfg, FakeDetector(near), self.store, faces=NoFaces())
+        f = frame()
+        for i in range(20):
+            worker.step(f, 2000 + i / 6)
+        worker.step(f, 2020)
+        self.assertEqual(self.db.search({})[1], 1)
+        self.assertEqual(worker.stats["SAVED"], 1)
+
+    def test_far_people_are_counted_not_saved(self):
+        far = [[Det(8, "person", 0.9, (380, 300, 400, 340))] for _ in range(10)]     # tiny in the picture
+        worker = CameraWorker(self.cam("face"), self.cfg, FakeDetector(far), self.store, faces=None)
+        f = frame()
+        for i in range(10):
+            worker.step(f, 2000 + i / 6)
+        self.assertEqual(self.db.search({})[1], 0)
+        self.assertEqual(worker.stats["too far / unsure (frames)"], 10)
 
     def test_flush_saves_tracks_still_open_at_shutdown(self):
         a = [[Det(1, "car", 0.9, box(400))] for _ in range(18)]

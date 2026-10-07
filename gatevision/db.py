@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS camera_status (
     last_frame  REAL,
     last_event  REAL,
     fps         REAL,
-    updated     REAL
+    updated     REAL,
+    skips       TEXT
 );
 """
 
@@ -95,6 +96,10 @@ class Database:
         self._local = threading.local()
         with self._conn() as c:
             c.executescript(SCHEMA)
+            try:                                   # older databases: add the column
+                c.execute("ALTER TABLE camera_status ADD COLUMN skips TEXT")
+            except sqlite3.OperationalError:
+                pass
 
     def _conn(self) -> sqlite3.Connection:
         c = getattr(self._local, "conn", None)
@@ -257,15 +262,15 @@ class Database:
             return c.execute("DELETE FROM users WHERE username=?", (username,)).rowcount > 0
 
     # ----------------------------------------------------- camera status
-    def update_camera_status(self, camera_id, name, role, direction, last_frame, last_event, fps):
+    def update_camera_status(self, camera_id, name, role, direction, last_frame, last_event, fps, skips=None):
         with self._conn() as c:
             c.execute(
-                "INSERT INTO camera_status(camera_id,name,role,direction,last_frame,last_event,fps,updated) "
-                "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(camera_id) DO UPDATE SET "
+                "INSERT INTO camera_status(camera_id,name,role,direction,last_frame,last_event,fps,updated,skips) "
+                "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(camera_id) DO UPDATE SET "
                 "name=excluded.name, role=excluded.role, direction=excluded.direction, "
                 "last_frame=excluded.last_frame, last_event=COALESCE(excluded.last_event, camera_status.last_event), "
-                "fps=excluded.fps, updated=excluded.updated",
-                (camera_id, name, role, direction, last_frame, last_event, fps, time.time()),
+                "fps=excluded.fps, updated=excluded.updated, skips=excluded.skips",
+                (camera_id, name, role, direction, last_frame, last_event, fps, time.time(), skips),
             )
 
     def camera_statuses(self):

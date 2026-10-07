@@ -2,6 +2,7 @@
 face, vote over many frames, and write ONE clean event per vehicle / person."""
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
@@ -100,6 +101,8 @@ class CameraWorker:
         self.last_event_ts: float | None = None
         self.events_saved = 0
         self.recent: list = []                    # (last_seen, last_pos) of recently recorded tracks
+        self.stats: Counter = Counter()           # why things were saved / skipped (shown on the Cameras page)
+        self.started = time.time()
 
     # --------------------------------------------------------------- step
     def step(self, frame, ts: float):
@@ -120,8 +123,10 @@ class CameraWorker:
                 continue
             # only things CLOSE to the camera: big enough in the picture
             if role == "face" and ((y2 - y1) / H < min_h or d.conf < person_conf):
+                self.stats["too far / unsure (frames)"] += 1
                 continue
             if role == "plate" and (x2 - x1) / W < min_w:
+                self.stats["too far (frames)"] += 1
                 continue
             st = self.tracks.get(d.track_id)
             if st is None:
@@ -237,10 +242,13 @@ class CameraWorker:
     def _finalize(self, st: TrackState):
         dur = st.last_seen - st.first_seen
         if dur < self.t["min_track_seconds"] or st.frames < 3 or st.best_crop is None:
+            self.stats["too short a visit"] += 1
             return
         if self.t["require_stop"] and not st.was_stopped:
+            self.stats["did not stop"] += 1
             return
         if self._is_retrack(st):
+            self.stats["same one seen again"] += 1
             self.recent.append((st.last_seen, st.last_pos))     # chain: later re-tracks match this one too
             return
         label = st.labels.most_common(1)[0][0]
@@ -257,6 +265,7 @@ class CameraWorker:
             norm = plate or ""
             if norm and self.last_plate.get(norm, -1e9) > ev["ts"] - self.t["dedup_seconds"]:
                 self.last_plate[norm] = ev["ts"]
+                self.stats["same plate again"] += 1
                 return                      # same vehicle seen again moments ago
             if norm:
                 self.last_plate[norm] = ev["ts"]
@@ -268,6 +277,7 @@ class CameraWorker:
             self.store.save_event(ev, full=st.best_full, crop=st.best_crop, plate=st.plate_img)
         else:
             if self.cam.get("require_face", self.t["require_face"]) and st.face_img is None:
+                self.stats["no face found"] += 1
                 return                      # no face found: tree, shadow or someone far/turned away
             upper, lower = clothing_colors(st.best_crop)
             ev.update(kind="person", upper_color=upper, lower_color=lower)
@@ -275,6 +285,7 @@ class CameraWorker:
             self.store.save_event(ev, full=st.best_full, crop=st.best_crop, face=st.face_img)
         self.recent.append((st.last_seen, st.last_pos))
         self.events_saved += 1
+        self.stats["SAVED"] += 1
         self.last_event_ts = ev["ts"]
         log.info("%s: saved %s event (%s)", cam["id"], ev["kind"], ev.get("plate_text") or label)
 
@@ -305,5 +316,6 @@ class CameraWorker:
                 last_status = now
                 status_db.update_camera_status(
                     self.cam["id"], self.cam["name"], self.cam["role"], self.cam["direction"],
-                    stream.last_frame_time or None, self.last_event_ts, fps)
+                    stream.last_frame_time or None, self.last_event_ts, fps,
+                    skips=json.dumps({"since": self.started, "counts": dict(self.stats)}))
         self.flush()
