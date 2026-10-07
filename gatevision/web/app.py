@@ -9,6 +9,7 @@ from pathlib import Path
 
 from flask import (Flask, abort, jsonify, redirect, render_template, request,
                    send_from_directory, session, url_for)
+from itsdangerous import BadSignature, URLSafeTimedSerializer
 from werkzeug.security import check_password_hash
 
 from ..colors import NAMES as COLOR_NAMES
@@ -17,6 +18,8 @@ from ..db import Database
 
 VEHICLE_TYPES = ["car", "motorcycle", "bus", "truck", "bicycle"]
 MAX_FAILS, LOCK_SECONDS = 5, 60
+TOKEN_DAYS = 90                 # how long a phone stays logged in
+MEDIA_KEYS = ("full_path", "crop_path", "plate_path", "face_path")
 
 
 def _parse_local(text: str | None):
@@ -56,16 +59,37 @@ def create_app(cfg: dict, db: Database | None = None) -> Flask:
     fails: dict[str, list] = {}   # ip -> [count, locked_until]
 
     # ------------------------------------------------------------ helpers
+    tokens = URLSafeTimedSerializer(app.config["SECRET_KEY"], salt="gatevision-mobile")
+
+    def identity():
+        """(username, role) from the browser session or a mobile Bearer token, else None."""
+        if "user" in session:
+            return session["user"], session.get("role")
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            try:
+                data = tokens.loads(auth[7:].strip(), max_age=TOKEN_DAYS * 86400)
+            except BadSignature:
+                return None
+            u = db.get_user(data.get("u", ""))
+            # a deleted user or changed role invalidates old tokens
+            if u and u["role"] == data.get("r"):
+                return u["username"], u["role"]
+        return None
+
     def login_required(roles=None):
         def deco(fn):
             @functools.wraps(fn)
             def wrapper(*a, **kw):
-                if "user" not in session:
+                ident = identity()
+                if ident is None:
                     if request.path.startswith("/api/"):
                         return jsonify(error="login required"), 401
                     return redirect(url_for("login", next=request.path))
-                if roles and session.get("role") not in roles:
-                    if session.get("role") == "guard":
+                if roles and ident[1] not in roles:
+                    if request.path.startswith("/api/"):
+                        return jsonify(error="not allowed"), 403
+                    if ident[1] == "guard":
                         return redirect(url_for("live"))
                     abort(403)
                 return fn(*a, **kw)
@@ -164,9 +188,7 @@ def create_app(cfg: dict, db: Database | None = None) -> Flask:
         return render_template("event.html", e=r, window=(r["ts"] - 120, r["ts"] + 120),
                                local=_to_local_input)
 
-    @app.route("/status")
-    @login_required(roles=("admin", "manager"))
-    def status():
+    def status_rows():
         now = time.time()
         rows = []
         for s in db.camera_statuses():
@@ -179,7 +201,12 @@ def create_app(cfg: dict, db: Database | None = None) -> Flask:
                 counts = {}
             d["skip_counts"] = sorted(counts.items(), key=lambda kv: (kv[0] != "SAVED", -kv[1]))
             rows.append(d)
-        return render_template("status.html", rows=rows)
+        return rows
+
+    @app.route("/status")
+    @login_required(roles=("admin", "manager"))
+    def status():
+        return render_template("status.html", rows=status_rows())
 
     # -------------------------------------------------------------- media
     @app.route("/media/<path:rel>")
@@ -201,6 +228,90 @@ def create_app(cfg: dict, db: Database | None = None) -> Flask:
                 d[k] = url_for("media", rel=d[k]) if d[k] else None
             out.append(d)
         return jsonify(events=out)
+
+
+    # ------------------------------------------------------- mobile api v1
+    def api_event(r) -> dict:
+        d = event_to_dict(r)
+        for k in MEDIA_KEYS:
+            d[k] = url_for("media", rel=d[k]) if d[k] else None
+        return d
+
+    @app.post("/api/v1/login")
+    def api_login():
+        body = request.get_json(silent=True) or {}
+        ip = request.remote_addr or "?"
+        count, locked = fails.get(ip, [0, 0.0])
+        if locked > time.time():
+            return jsonify(error="Too many attempts. Wait a minute and try again."), 429
+        u = db.get_user(str(body.get("username", "")).strip())
+        if u and check_password_hash(u["password_hash"], str(body.get("password", ""))):
+            fails.pop(ip, None)
+            token = tokens.dumps({"u": u["username"], "r": u["role"]})
+            return jsonify(token=token, username=u["username"], role=u["role"], days=TOKEN_DAYS)
+        count += 1
+        fails[ip] = [0, time.time() + LOCK_SECONDS] if count >= MAX_FAILS else [count, 0.0]
+        return jsonify(error="Wrong username or password."), 401
+
+    @app.get("/api/v1/meta")
+    @login_required()
+    def api_meta():
+        return jsonify(
+            cameras=[{"id": c["id"], "name": c["name"], "direction": c["direction"], "role": c["role"]}
+                     for c in cameras],
+            vehicle_types=VEHICLE_TYPES, colors=COLOR_NAMES, kinds=["vehicle", "person"],
+            server_time=time.time())
+
+    @app.get("/api/v1/events")
+    @login_required()
+    def api_v1_events():
+        a = request.args
+        after = int(a["after_id"]) if a.get("after_id", "").isdigit() else 0
+        limit = min(100, int(a["limit"])) if a.get("limit", "").isdigit() else 40
+        rows = db.latest_events(limit, after)
+        return jsonify(events=[api_event(r) for r in rows], server_time=time.time())
+
+    @app.get("/api/v1/search")
+    @login_required(roles=("admin", "manager"))
+    def api_search():
+        a = request.args
+
+        def num(key):
+            try:
+                return float(a[key]) if a.get(key) else None
+            except ValueError:
+                return None
+
+        f = {
+            "plate": a.get("plate", "").strip(), "fuzzy": a.get("fuzzy") in ("1", "true"),
+            "kind": a.get("kind", ""), "direction": a.get("direction", ""),
+            "camera_id": a.get("camera_id", ""), "vehicle_type": a.get("vehicle_type", ""),
+            "color": a.get("color", ""), "upper_color": a.get("upper_color", ""),
+            "lower_color": a.get("lower_color", ""), "ts_from": num("ts_from"), "ts_to": num("ts_to"),
+        }
+        if f["plate"] and not f["kind"]:
+            f["kind"] = "vehicle"
+        size = min(100, int(a["page_size"])) if a.get("page_size", "").isdigit() and int(a["page_size"]) > 0 else 40
+        page = int(a["page"]) if a.get("page", "").isdigit() and int(a["page"]) > 0 else 1
+        rows, total = db.search(f, limit=size, offset=(page - 1) * size)
+        return jsonify(events=[api_event(r) for r in rows], total=total, page=page,
+                       pages=max(1, -(-total // size)))
+
+    @app.get("/api/v1/events/<int:event_id>")
+    @login_required(roles=("admin", "manager"))
+    def api_event_one(event_id):
+        r = db.get_event(event_id)
+        if r is None:
+            return jsonify(error="not found"), 404
+        return jsonify(event=api_event(r))
+
+    @app.get("/api/v1/status")
+    @login_required(roles=("admin", "manager"))
+    def api_status():
+        out = []
+        for d in status_rows():
+            out.append({k: d.get(k) for k in ("camera_id", "name", "role", "direction", "online", "age", "fps")})
+        return jsonify(cameras=out)
 
     @app.after_request
     def headers(resp):

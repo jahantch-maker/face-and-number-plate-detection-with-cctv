@@ -50,6 +50,7 @@ KEEP_BACKUPS = 5
 PRESERVE_NAMES = {
     "config.yaml", "data", "models", ".venv", "_backup", ".git",
     "gpu_mode.txt", "update.bat", ".version", ".manifest.json",
+    "android", ".github",    # the phone app's source: not needed on the server
 }
 # Patterns that are preserved anywhere in the tree.
 PRESERVE_PATTERNS = ("*.pt", "*.log", "probe_*.jpg", "*_result.jpg", "*.pyc")

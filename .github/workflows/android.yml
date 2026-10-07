@@ -1,0 +1,51 @@
+name: Build Android app
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-build
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build the APK
+        working-directory: android
+        run: gradle --no-daemon assembleRelease -PversionCode=${{ github.run_number }}
+
+      - name: Publish the APK as the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android/app/build/outputs/apk/release/app-release.apk GateVision.apk
+          gh release delete android-latest --cleanup-tag --yes || true
+          gh release create android-latest GateVision.apk \
+            --title "Gate Vision Android (build ${{ github.run_number }})" \
+            --notes "Download GateVision.apk on your phone and install it. Each new build installs as an update over the old one."
+
+      - name: Keep a copy as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GateVision-apk
+          path: GateVision.apk

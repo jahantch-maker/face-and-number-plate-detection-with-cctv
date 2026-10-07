@@ -27,6 +27,22 @@ Cameras --RTSP--> run_engine.py --> database + photos (D:\gatevision_data)
 4. Double-click **`start_all.bat`**, then open http://localhost:8080.
 5. When happy, right-click **`install_autostart.bat`** and *Run as administrator* so it starts after power cuts.
 
+## Android app (phone)
+
+A native Android app (**Gate Vision**) shows the same live detections and search as the web page, and refreshes
+itself every 2 seconds while it is open. Source: `android/`. Guard accounts see only the live list; admin / manager
+accounts get Live, Search (all the web filters) and Cameras.
+
+1. **Server side:** run `update.bat` once so the server has the phone API (`/api/v1/...`).
+2. **Reach the server from anywhere:** install **Tailscale** (free) on the server and on the phone, sign in to the
+   same account, and note the server's Tailscale address (`100.x.y.z`).
+3. **Get the app:** open this repo's **Releases** page on the phone, tap the `android-latest` release and install
+   `GateVision.apk` (allow "install unknown apps" for your browser once).
+4. Open the app, enter the server address (`100.x.y.z` is enough), your web user name and password.
+
+Every change to `android/` on GitHub is built automatically (Actions tab -> *Build Android app*) and replaces the
+`android-latest` release; installing the new APK updates the app in place and keeps you signed in.
+
 ## Updating to the latest version (one click)
 
 Every improvement is published on GitHub. To get it on the gate PC / server, double-click **`update.bat`**.

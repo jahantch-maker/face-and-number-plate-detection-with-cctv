@@ -62,6 +62,11 @@ class UpdateTests(unittest.TestCase):
         self.assertTrue((self.root / "old.py").exists())
         self.assertFalse((self.root / "new.py").exists())
 
+    def test_phone_app_source_not_installed_on_server(self):
+        self.run_update({"run_engine.py": "v1", "android/app/x.kt": "k", ".github/workflows/a.yml": "y"})
+        self.assertFalse((self.root / "android").exists())
+        self.assertFalse((self.root / ".github").exists())
+
     def test_rejects_wrong_zip(self):
         self.assertEqual(self.run_update({"hello.txt": "x"}), 1)
 
