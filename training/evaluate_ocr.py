@@ -25,7 +25,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from common import ROOT, UNREADABLE, plates_dir
+from common import ROOT, has_text, plates_dir
 
 BIKES = ("motorcycle", "bicycle")
 
@@ -40,7 +40,7 @@ def load_rows(path: Path):
             else:                                               # labels.csv from label_plates
                 text, img = r.get("label", ""), path.parent / "images" / r["file"]
                 group = "bike / rickshaw" if r.get("vehicle") in BIKES else (r.get("vehicle") or "other")
-            if text and text != UNREADABLE:
+            if has_text(text):
                 out.append((img, text.upper(), group))
     return out
 
