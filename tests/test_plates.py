@@ -28,6 +28,17 @@ class PlateTests(unittest.TestCase):
         self.assertGreater(conf, 0.5)
         self.assertEqual(vote([])[0], None)
 
+    def test_vote_merges_spellings_that_differ_by_a_character(self):
+        # a clear bike plate, each frame/variant misreading a different character:
+        # no single spelling wins much weight, but together they agree on the plate
+        reads = [PlateRead(t, t, c, True) for t, c in [
+            ("AWS5573", 0.93), ("AWS5578", 0.88), ("ARS5573", 0.88), ("AWS5673", 0.82),
+            ("AWG5573", 0.86), ("AWS5573", 0.89), ("ANS5573", 0.70), ("JGL4569", 0.60)]]
+        text, share, best = vote(reads)
+        self.assertEqual(text, "AWS5573")
+        self.assertGreater(share, 0.8)
+        self.assertGreater(best.conf, 0.8)
+
 
 if __name__ == "__main__":
     unittest.main()
