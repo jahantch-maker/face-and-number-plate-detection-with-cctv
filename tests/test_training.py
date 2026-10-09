@@ -96,6 +96,22 @@ class CustomReaderTests(unittest.TestCase):
             self.assertEqual(_custom_ocr_files(str(model))[0], model)
         self.assertIsNone(_custom_ocr_files(None))
 
+    def test_reader_that_comes_with_the_update_is_used_unless_the_server_has_its_own(self):
+        from gatevision.config import load_config
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "config.yaml").write_text("cameras: []\n")
+            self.assertEqual(Path(load_config(d / "config.yaml")["models"]["plate_ocr_custom"]).parent.name, "models")
+            (d / "trained").mkdir()
+            (d / "trained" / "pk_plate_ocr.onnx").write_bytes(b"x")
+            self.assertEqual(load_config(d / "config.yaml")["models"]["plate_ocr_custom"],
+                             str(d / "trained" / "pk_plate_ocr.onnx"))
+            (d / "models").mkdir()
+            (d / "models" / "pk_plate_ocr.onnx").write_bytes(b"x")
+            self.assertEqual(Path(load_config(d / "config.yaml")["models"]["plate_ocr_custom"]).parent.name, "models")
+            (d / "config.yaml").write_text("cameras: []\nmodels:\n  plate_ocr_custom: null\n")
+            self.assertIsNone(load_config(d / "config.yaml")["models"]["plate_ocr_custom"])
+
 
 if __name__ == "__main__":
     unittest.main()
