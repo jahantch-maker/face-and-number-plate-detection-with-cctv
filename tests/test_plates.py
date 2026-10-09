@@ -40,6 +40,18 @@ class PlateTests(unittest.TestCase):
         self.assertGreater(best.conf, 0.8)
 
 
+class ConfidenceTests(unittest.TestCase):
+    def test_character_confidence_ignores_the_empty_slots(self):
+        from types import SimpleNamespace
+        from gatevision.plates import _confs
+        junk = SimpleNamespace(text="AB12", confidence=[0.1, 0.2, 0.1, 0.2, 1, 1, 1, 1, 1])
+        full, chars = _confs(junk)
+        self.assertGreater(full, 0.5)
+        self.assertAlmostEqual(chars, 0.15)
+        self.assertEqual(_confs(SimpleNamespace(text="", confidence=[1.0] * 9))[1], 0.0)
+        self.assertEqual(PlateRead("AB12", "", 0.7, True).text_conf, 0.7)
+
+
 if __name__ == "__main__":
     unittest.main()
 

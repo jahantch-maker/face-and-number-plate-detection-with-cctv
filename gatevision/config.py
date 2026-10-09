@@ -37,6 +37,7 @@ DEFAULTS = {
         "min_plate_conf": 0.20,      # reads below 0.5 are shown with a "?" so a human checks the photo
         "min_show_conf": 0.15,       # final plate text below this is not saved as the plate (kept as a "guess")
         "min_single_read_conf": 0.35, # ... nor when only ONE read supports it and it is below this
+        "min_plate_photo_conf": 0.30, # no plate photo when its characters are read with less than this (feet, lamps, cargo)
         # "Near the camera only" rules. Sizes are fractions of the picture, so
         # they work for any camera resolution. Override per camera with
         # min_height / min_width / require_face / person_conf in config.yaml.
@@ -60,6 +61,9 @@ DEFAULTS = {
     },
     "cameras": [],
 }
+
+
+SHIPPED_OCR = "trained/pk_plate_ocr.onnx"
 
 
 def _merge(base: dict, override: dict) -> dict:
@@ -88,7 +92,11 @@ def load_config(path: str | Path = "config.yaml") -> dict:
     cfg["storage"]["data_dir"] = str(data_dir)
     custom = cfg["models"].get("plate_ocr_custom")
     if custom and not Path(custom).is_absolute():
-        cfg["models"]["plate_ocr_custom"] = str(base / custom)
+        cfg["models"]["plate_ocr_custom"] = custom = str(base / custom)
+    if custom and not Path(custom).is_file() and (base / SHIPPED_OCR).is_file():
+        # no reader trained on this server yet: use the one trained on our gate photos
+        # that comes with the update (a file in models\ always wins; null turns both off)
+        cfg["models"]["plate_ocr_custom"] = str(base / SHIPPED_OCR)
     face_model = Path(cfg["models"]["face_model"])
     if not face_model.is_absolute():
         cfg["models"]["face_model"] = str(base / face_model)

@@ -290,7 +290,7 @@ class CameraWorker:
 
     def _take_reads(self, st: TrackState, reads, image):
         """Keep readable texts for voting, and the best plate PHOTO even if the
-        text could not be read (so a human can still read it)."""
+        text was too unsure to vote with (so a human can still read it)."""
         for r in reads:
             if r.det_conf and r.det_conf < 0.35:
                 continue                      # the finder is not convinced this is a plate (grass, sticker ...)
@@ -302,7 +302,9 @@ class CameraWorker:
                 continue                      # text that does not look like a plate and is not a sure read
             if r.text and r.conf >= self.t["min_plate_conf"]:
                 st.reads.append(r)
-            if r.box:
+            if r.box and r.text_conf >= self.t["min_plate_photo_conf"]:
+                # nothing on it could be read: feet, lamps and cargo end up here, and a
+                # plate this blurry would not help a human either
                 pc = _clip_crop(image, r.box, pad=0.15)
                 if pc is not None:
                     # best plate photo: sure it is a plate, sure of the text, big and sharp

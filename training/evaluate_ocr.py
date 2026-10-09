@@ -72,8 +72,9 @@ def main():
     from gatevision.config import DEFAULTS
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--labels", type=Path, default=plates_dir() / "labels.csv")
-    custom = ROOT / DEFAULTS["models"]["plate_ocr_custom"]
-    in_use = str(custom) if custom.exists() else DEFAULTS["models"]["plate_ocr"]
+    from gatevision.config import SHIPPED_OCR
+    custom = next((p for p in (ROOT / DEFAULTS["models"]["plate_ocr_custom"], ROOT / SHIPPED_OCR) if p.exists()), None)
+    in_use = str(custom) if custom else DEFAULTS["models"]["plate_ocr"]
     ap.add_argument("--model", default=in_use)
     ap.add_argument("--out", type=Path, default=Path("evaluate_ocr_results.csv"))
     args = ap.parse_args()

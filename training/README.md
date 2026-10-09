@@ -76,3 +76,9 @@ converts it.
 The app loads `models/pk_plate_ocr.onnx` + `models/pk_plate_ocr_config.yaml`
 when both exist (`models.plate_ocr_custom` in the config), and falls back to
 the built-in reader if they fail to load.
+Without them it uses `trained/pk_plate_ocr.onnx`, which comes with the update:
+fine-tuned on 319 labelled gate photos (2026-10-09) plus 6,000 made-up bike
+plates. On 52 held-out gate photos it read 75% exactly right against 67% for
+the built-in reader (bikes and rickshaws 65% against 50%). Set
+`plate_ocr_custom: null` under `models:` in config.yaml to go back to the
+built-in reader.
