@@ -22,6 +22,9 @@ Owner: Jahanzaib (Faisalabad). Brand name of the product: **Gate Vision**.
 ## Code map
 - `run_engine.py` - reads cameras, detects, tracks, saves events. `gatevision/pipeline.py`, `detect.py` (YOLO11 + ByteTrack, needs `lap`),
   `plates.py` (fast-alpr: plate detector + OCR), `faces.py` (YuNet), `colors.py`, `stream.py` (RTSP with back-off), `db.py` (SQLite), `storage.py`.
+- Plate reading runs on a background thread per plate camera (`CameraWorker.start_ocr`, called by `run()`), so the camera keeps
+  being watched while a plate is read; tests call `step()` directly and read synchronously. Weak single reads are saved only as
+  `extra.plate_guess` (shown on the detail page), and plates one character apart within `dedup_seconds` (30) are merged into one record.
 - `run_web.py` + `gatevision/web/` - Flask + waitress on port 8080: login, search, live list, event detail, camera status.
 - Roles: `admin`, `manager` (everything), `guard` (live list only). Users via `manage_users.py`.
 - **Mobile API** (`/api/v1/...` in `gatevision/web/app.py`): token login (`POST /api/v1/login`, 90-day signed Bearer token,

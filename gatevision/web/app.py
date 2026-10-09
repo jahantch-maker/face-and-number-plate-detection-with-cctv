@@ -185,8 +185,12 @@ def create_app(cfg: dict, db: Database | None = None) -> Flask:
         r = db.get_event(event_id)
         if r is None:
             abort(404)
+        try:
+            guess = json.loads(r["extra"] or "{}").get("plate_guess")
+        except (ValueError, AttributeError):
+            guess = None
         return render_template("event.html", e=r, window=(r["ts"] - 120, r["ts"] + 120),
-                               local=_to_local_input)
+                               local=_to_local_input, guess=None if r["plate_text"] else guess)
 
     def status_rows():
         now = time.time()

@@ -32,8 +32,10 @@ DEFAULTS = {
         "ocr_interval": 0.15,      # seconds between plate reads of one vehicle
         "max_ocr_attempts": 24,
         "max_face_attempts": 30,
-        "dedup_seconds": 15,       # same plate on same camera within this = one
+        "dedup_seconds": 30,       # same plate (or one character different) on same camera within this = one
         "min_plate_conf": 0.20,      # reads below 0.5 are shown with a "?" so a human checks the photo
+        "min_show_conf": 0.15,       # final plate text below this is not saved as the plate (kept as a "guess")
+        "min_single_read_conf": 0.35, # ... nor when only ONE read supports it and it is below this
         # "Near the camera only" rules. Sizes are fractions of the picture, so
         # they work for any camera resolution. Override per camera with
         # min_height / min_width / require_face / person_conf in config.yaml.

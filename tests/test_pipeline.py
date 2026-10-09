@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -460,3 +461,112 @@ class PlateFinderSafetyTests(PipelineTests):
             self.assertEqual(calls[0], "yolo-v9-s-608-license-plate-end2end")
         finally:
             del sys.modules["fast_alpr"]
+
+
+class CaptureSpeedTests(PipelineTests):
+    """Plate reading must not stop the camera from watching; weak guesses and
+    near-duplicate plates must not clutter the records."""
+
+    def _stopped(self, tid=1, n=30):
+        return [[Det(tid, "car", 0.9, box(400))] for _ in range(n)]
+
+    def test_plates_are_read_in_the_background_when_running(self):
+        import threading
+        import time as _time
+
+        class SlowPlates:
+            threads = set()
+
+            def read(self, crop):
+                self.threads.add(threading.current_thread().name)
+                _time.sleep(0.02)
+                return [PlateRead("ASY3549", "ASY3549", 0.9, True, (10, 10, 60, 30), det_conf=0.9)]
+
+        plates = SlowPlates()
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(self._stopped()), self.store, plates=plates)
+        worker.start_ocr()
+        f = frame()
+        for i in range(30):
+            worker.step(f, 1000 + i / 10)
+            _time.sleep(0.005)
+        deadline = _time.time() + 5
+        while worker._ocr_waiting(1) and _time.time() < deadline:
+            _time.sleep(0.01)
+        worker.step(f, 1000 + 3 + 6)
+        rows, total = self.db.search({})
+        self.assertEqual(total, 1)
+        self.assertEqual(rows[0]["plate_text"], "ASY-3549")
+        self.assertNotIn(threading.current_thread().name, plates.threads)   # never read on the camera's own thread
+
+    def test_track_waits_for_its_last_plate_reading(self):
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(self._stopped(n=10)), self.store,
+                              plates=FakePlates(["ABC123"]))
+        worker._ocr_thread = object()                  # pretend a reader thread exists but is slow
+        f = frame()
+        for i in range(10):
+            worker.step(f, 1000 + i / 10)
+        self.assertTrue(worker._ocr_waiting(1))
+        worker.step(f, 1000 + 1 + 3)                   # gone, but its picture is still waiting
+        self.assertEqual(self.db.search({})[1], 0)
+        worker.step(f, 1000 + 1 + 10)                  # gives up waiting after a few seconds
+        self.assertEqual(self.db.search({})[1], 1)
+
+    def test_single_weak_read_is_kept_only_as_a_guess(self):
+        class OnceUnsure:
+            n = 0
+
+            def read(self, img):
+                self.n += 1
+                if self.n == 1:
+                    return [PlateRead("UCC433", "UCC433", 0.31, True, (10, 10, 90, 40), det_conf=0.8)]
+                return [PlateRead("", "", 0.0, False, (10, 10, 90, 40), det_conf=0.8)]
+
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(self._stopped()), self.store, plates=OnceUnsure())
+        self.run_script(worker, 30, fps=10)
+        row = self.db.search({})[0][0]
+        self.assertIsNone(row["plate_text"])
+        self.assertTrue(row["plate_path"])                       # the photo is still there for a human
+        self.assertEqual(json.loads(row["extra"])["plate_guess"], "UCC-433")
+        self.assertEqual(worker.stats["plate too unsure"], 1)
+
+    def test_plate_missing_a_letter_is_merged_into_one_record_with_the_fuller_text(self):
+        class Switchable:
+            text = "DN6555"
+
+            def read(self, img):
+                return [PlateRead(self.text, self.text, 0.6, True, (10, 10, 90, 40), det_conf=0.8)]
+
+        plates = Switchable()
+        a = self._stopped(1, 20)
+        gap = [[] for _ in range(100)]                           # 10 s apart: not a re-track
+        b = self._stopped(2, 20)
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(a + gap + b), self.store, plates=plates)
+        f = frame()
+        for i in range(len(a) + len(gap)):
+            worker.step(f, 1000 + i / 10)
+        plates.text = "FDN6555"
+        for i in range(len(b)):
+            worker.step(f, 1000 + (len(a) + len(gap) + i) / 10)
+        worker.step(f, 1000 + 20)
+        rows, total = self.db.search({})
+        self.assertEqual(total, 1)
+        self.assertEqual(rows[0]["plate_text"], "FDN-6555")
+
+    def test_clearly_different_plates_are_not_merged(self):
+        class Switchable:
+            text = "ABC123"
+
+            def read(self, img):
+                return [PlateRead(self.text, self.text, 0.9, True, (10, 10, 90, 40), det_conf=0.8)]
+
+        plates = Switchable()
+        a, gap, b = self._stopped(1, 20), [[] for _ in range(100)], self._stopped(2, 20)
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(a + gap + b), self.store, plates=plates)
+        f = frame()
+        for i in range(len(a) + len(gap)):
+            worker.step(f, 1000 + i / 10)
+        plates.text = "XYZ789"
+        for i in range(len(b)):
+            worker.step(f, 1000 + (len(a) + len(gap) + i) / 10)
+        worker.step(f, 1000 + 20)
+        self.assertEqual(self.db.search({})[1], 2)

@@ -4,7 +4,8 @@
 <p><a href="javascript:history.back()">← Back to results</a></p>
 <div class="detail">
   <div class="panel">
-    <h2>{{ e.plate_text or ('Person' if e.kind == 'person' else 'Vehicle – plate not read') }}
+    {% set unsure = e.plate_text and e.plate_conf is not none and e.plate_conf < 0.5 %}
+    <h2>{{ e.plate_text or ('Person' if e.kind == 'person' else 'Vehicle – plate not read') }}{{ '?' if unsure }}
       <span class="dir {{ e.direction }}">{{ e.direction }}</span></h2>
     <table class="kv">
       <tr><th>Time</th><td>{{ e.ts_text }}</td></tr>
@@ -12,6 +13,8 @@
       {% if e.kind == 'vehicle' %}
         <tr><th>Vehicle</th><td>{{ e.vehicle_type or '–' }}, {{ e.color or 'colour unknown' }}</td></tr>
         <tr><th>Plate confidence</th><td>{{ '%.0f%%' % (e.plate_conf * 100) if e.plate_conf else '–' }}</td></tr>
+        {% if unsure %}<tr><th></th><td class="muted">Uncertain - check the plate photo</td></tr>{% endif %}
+        {% if guess %}<tr><th>Best guess</th><td>{{ guess }}? <span class="muted">(too unsure to use for search - read the plate photo)</span></td></tr>{% endif %}
       {% else %}
         <tr><th>Clothing</th><td>top {{ e.upper_color or '–' }}, bottom {{ e.lower_color or '–' }}</td></tr>
       {% endif %}
