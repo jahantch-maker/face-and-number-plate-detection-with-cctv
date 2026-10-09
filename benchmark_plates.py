@@ -28,8 +28,8 @@ def main():
         print("no photos found in", folder)
         return
     m = DEFAULTS["models"]
-    reader = PlateReader(m["plate_detector"], m["plate_ocr"])
-    print("plate finder:", reader.detector_model, "| reader:", m["plate_ocr"], "|", len(files), "photos\n")
+    reader = PlateReader(m["plate_detector"], m["plate_ocr"], ocr_custom=m.get("plate_ocr_custom"))
+    print("plate finder:", reader.detector_model, "| reader:", reader.ocr_name, "|", len(files), "photos\n")
     rows, found, readable = [], 0, 0
     t0 = time.time()
     for i, p in enumerate(files, 1):
