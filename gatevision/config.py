@@ -20,6 +20,7 @@ DEFAULTS = {
         "detector_conf": 0.35,
         "plate_detector": "yolo-v9-t-640-license-plate-end2end",   # best on tilted / red-lit plates in our gate test
         "plate_ocr": "cct-xs-v1-global-model",
+        "plate_ocr_custom": "models/pk_plate_ocr.onnx",   # our own trained reader: used instead when this file exists
         "face_model": "models/face_detection_yunet_2023mar.onnx",
     },
     "tracking": {
@@ -85,6 +86,9 @@ def load_config(path: str | Path = "config.yaml") -> dict:
     if not data_dir.is_absolute():
         data_dir = base / data_dir
     cfg["storage"]["data_dir"] = str(data_dir)
+    custom = cfg["models"].get("plate_ocr_custom")
+    if custom and not Path(custom).is_absolute():
+        cfg["models"]["plate_ocr_custom"] = str(base / custom)
     face_model = Path(cfg["models"]["face_model"])
     if not face_model.is_absolute():
         cfg["models"]["face_model"] = str(base / face_model)

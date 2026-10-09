@@ -183,9 +183,19 @@ FALLBACK_DETECTORS = ["yolo-v9-t-640-license-plate-end2end", "yolo-v9-t-512-lice
 FALLBACK_DETECTOR = FALLBACK_DETECTORS[-1]
 
 
+def _custom_ocr_files(path):
+    """(model.onnx, model_config.yaml) when a trained reader is in place, else None."""
+    from pathlib import Path
+    if not path:
+        return None
+    model = Path(path)
+    cfg = model.with_name(model.stem + "_config.yaml")
+    return (model, cfg) if model.is_file() and cfg.is_file() else None
+
+
 class PlateReader:
     def __init__(self, detector_model: str, ocr_model: str, use_gpu: bool = False,
-                 detector_conf_thresh: float | None = None):
+                 detector_conf_thresh: float | None = None, ocr_custom: str | None = None):
         import logging
         from fast_alpr import ALPR  # lazy import
 
@@ -193,6 +203,20 @@ class PlateReader:
         gpu = {"detector_providers": ["CUDAExecutionProvider", "CPUExecutionProvider"],
                "ocr_providers": ["CUDAExecutionProvider", "CPUExecutionProvider"]} if use_gpu else {}
         thresh = {"detector_conf_thresh": detector_conf_thresh} if detector_conf_thresh else {}
+        ocr = {"ocr_model": ocr_model}
+        self.ocr_name = ocr_model
+        custom = _custom_ocr_files(ocr_custom)
+        if custom:
+            try:                         # check it loads before handing it to the plate finder
+                from fast_plate_ocr import LicensePlateRecognizer
+                LicensePlateRecognizer(onnx_model_path=custom[0], plate_config_path=custom[1])
+            except Exception as exc:     # a broken or too-new trained reader must not stop the cameras
+                log.warning("trained plate reader %s could not be loaded (%s) - using %s", custom[0], exc, ocr_model)
+                custom = None
+        if custom:                       # our own reader, trained on Pakistani plates (training/README.md)
+            ocr = {"ocr_model": None, "ocr_model_path": custom[0], "ocr_config_path": custom[1]}
+            self.ocr_name = str(custom[0])
+            log.info("using the trained plate reader %s", custom[0])
         # tolerate fast-alpr versions that do not know some keywords
         kw_sets = [{**gpu, **thresh}, thresh, gpu, {}]
         models = [detector_model] + [m for m in FALLBACK_DETECTORS if m != detector_model]
@@ -200,7 +224,7 @@ class PlateReader:
         for model in models:
             for kw in kw_sets:
                 try:
-                    self.alpr = ALPR(detector_model=model, ocr_model=ocr_model, **kw)
+                    self.alpr = ALPR(detector_model=model, **ocr, **kw)
                     self.detector_model = model
                     if model != detector_model:
                         log.warning("plate detector %s unavailable (%s) - using %s", detector_model, last, model)
@@ -210,6 +234,10 @@ class PlateReader:
                 except Exception as exc:          # unknown model name, download problem ...
                     last = exc
                     break
+        if custom:                       # a broken or too-new trained reader must not stop the cameras
+            log.warning("trained plate reader %s could not be loaded (%s) - using %s", custom[0], last, ocr_model)
+            self.__init__(detector_model, ocr_model, use_gpu, detector_conf_thresh)
+            return
         raise last
 
     def read(self, bgr, extra_ocr: bool = True) -> list[PlateRead]:

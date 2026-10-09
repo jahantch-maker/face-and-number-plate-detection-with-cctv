@@ -61,7 +61,7 @@ def main():
         except Exception:
             gpu = False
         log.info("loading plate models (GPU=%s)", gpu)
-        plates = PlateReader(m["plate_detector"], m["plate_ocr"], use_gpu=gpu)
+        plates = PlateReader(m["plate_detector"], m["plate_ocr"], use_gpu=gpu, ocr_custom=m.get("plate_ocr_custom"))
 
     stop = threading.Event()
     threads, streams = [], []
