@@ -602,3 +602,34 @@ class VehiclePhotoTests(PipelineTests):
         self.assertEqual(row["plate_text"], "CCG-856")
         self.assertTrue(blue(cv2.imread(str(self.dir / row["crop_path"]))))   # from the approach, not the biggest frame
         self.assertTrue(blue(cv2.imread(str(self.dir / row["full_path"]))))
+
+    def test_quick_pass_with_a_readable_plate_is_saved(self):
+        quick = [[Det(1, "motorcycle", 0.9, box(400, w=300, h=300))] for _ in range(2)]   # close for 2 pictures only
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(quick), self.store, plates=FakePlates(["FDN6555"]))
+        self.run_script(worker, 2, fps=4.4)
+        rows, total = self.db.search({})
+        self.assertEqual(total, 1)
+        self.assertEqual(rows[0]["plate_text"], "FDN-6555")
+
+    def test_quick_pass_of_a_person_with_a_face_is_saved(self):
+        quick = [[Det(1, "person", 0.9, (380, 300, 540, 640))] for _ in range(2)]
+        worker = CameraWorker(self.cam("face"), self.cfg, FakeDetector(quick), self.store, faces=FakeFaces())
+        self.run_script(worker, 2, fps=4.4)
+        self.assertEqual(self.db.search({"kind": "person"})[1], 1)
+
+    def test_quick_flicker_without_plate_or_face_is_still_dropped(self):
+        class Nothing:
+            def read(self, img):
+                return []
+
+            def detect(self, img):
+                return []
+        quick = [[Det(1, "car", 0.9, box(400))] for _ in range(2)]
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(quick), self.store, plates=Nothing())
+        self.run_script(worker, 2, fps=4.4)
+        self.assertEqual(self.db.search({})[1], 0)
+        self.assertEqual(worker.stats["too short a visit"], 1)
+        person = [[Det(2, "person", 0.9, (380, 300, 540, 640))] for _ in range(2)]
+        worker = CameraWorker(self.cam("face"), self.cfg, FakeDetector(person), self.store, faces=Nothing())
+        self.run_script(worker, 2, fps=4.4)
+        self.assertEqual(self.db.search({})[1], 0)

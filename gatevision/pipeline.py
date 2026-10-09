@@ -389,7 +389,12 @@ class CameraWorker:
 
     def _finalize(self, st: TrackState):
         dur = st.last_seen - st.first_seen
-        if dur < self.t["min_track_seconds"] or st.frames < 3 or st.best_crop is None:
+        # A quick pass is still a real vehicle / person when a plate or face was
+        # found on it: at the 4-5 pictures a second a CPU manages, a bike crossing
+        # the speed breaker can be close enough for only one or two of them.
+        # Without such proof, short tracks are flickers (shadows, trees) and dropped.
+        proof = bool(st.reads) or st.plate_img is not None or st.face_img is not None
+        if st.best_crop is None or (not proof and (dur < self.t["min_track_seconds"] or st.frames < 3)):
             self.stats["too short a visit"] += 1
             return
         if self.t["require_stop"] and not st.was_stopped:
