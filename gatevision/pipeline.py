@@ -73,6 +73,8 @@ class TrackState:
         self.reads: list = []
         self.plate_img = None
         self.plate_img_conf = 0.0
+        self.plate_full = None                # the picture in which the plate was clearest ...
+        self.plate_crop = None                # ... and the vehicle in it: the photos saved for a vehicle
         self.face_img = None
         self.face_score = 0.0
         self.ocr_attempts = 0
@@ -217,7 +219,7 @@ class CameraWorker:
             return
         whole = not any(r.text for r in st.reads) and st.ocr_attempts % 3 == 0
         for reads, image in self._plate_reads(crop, frame, det.box, whole):
-            self._take_reads(st, reads, image)
+            self._take_reads(st, reads, image, scene=(frame, crop))
 
     def _plate_reads(self, crop, frame, box, whole: bool):
         """Read one vehicle crop. ``whole``: also look at the whole picture, for
@@ -277,20 +279,23 @@ class CameraWorker:
                 log.exception("%s: plate reading error", self.cam["id"])
                 result = []
             with self._ocr_lock:
-                self._ocr_done.append((tid, result))
+                self._ocr_done.append((tid, result, (frame, crop)))
                 self._ocr_busy.discard(tid)
 
     def _apply_ocr_results(self):
         while self._ocr_done:
-            tid, result = self._ocr_done.popleft()
+            tid, result, scene = self._ocr_done.popleft()
             st = self.tracks.get(tid)
             if st is not None:
                 for reads, image in result:
-                    self._take_reads(st, reads, image)
+                    self._take_reads(st, reads, image, scene=scene)
 
-    def _take_reads(self, st: TrackState, reads, image):
+    def _take_reads(self, st: TrackState, reads, image, scene=None):
         """Keep readable texts for voting, and the best plate PHOTO even if the
-        text was too unsure to vote with (so a human can still read it)."""
+        text was too unsure to vote with (so a human can still read it). ``scene``
+        is the (full picture, vehicle crop) the reads came from: the vehicle photos
+        are taken from the moment its plate was clearest, when it faced the camera,
+        not from when it was biggest (often already driving past the camera)."""
         for r in reads:
             if r.det_conf and r.det_conf < 0.35:
                 continue                      # the finder is not convinced this is a plate (grass, sticker ...)
@@ -312,6 +317,8 @@ class CameraWorker:
                     quality = sure * math.sqrt(pc.shape[0] * pc.shape[1]) * (1.0 + min(_sharpness(pc), 300.0) / 100.0)
                     if quality > st.plate_img_conf:
                         st.plate_img, st.plate_img_conf = pc.copy(), quality
+                        if scene is not None:
+                            st.plate_full, st.plate_crop = scene
 
     def _find_face(self, st: TrackState, frame, det):
         st.face_attempts += 1
@@ -384,7 +391,12 @@ class CameraWorker:
 
     def _finalize(self, st: TrackState):
         dur = st.last_seen - st.first_seen
-        if dur < self.t["min_track_seconds"] or st.frames < 3 or st.best_crop is None:
+        # A quick pass is still a real vehicle / person when a plate or face was
+        # found on it: at the 4-5 pictures a second a CPU manages, a bike crossing
+        # the speed breaker can be close enough for only one or two of them.
+        # Without such proof, short tracks are flickers (shadows, trees) and dropped.
+        proof = bool(st.reads) or st.plate_img is not None or st.face_img is not None
+        if st.best_crop is None or (not proof and (dur < self.t["min_track_seconds"] or st.frames < 3)):
             self.stats["too short a visit"] += 1
             return
         if self.t["require_stop"] and not st.was_stopped:
@@ -423,7 +435,8 @@ class CameraWorker:
             ev["extra"]["plate_reads"] = len(st.reads)
             ev["extra"]["plate_raw"] = best.raw if best else None
             plate_photo = enhance_plate(st.plate_img) if (st.plate_img is not None and self.cfg.get("enhance", {}).get("plates", True)) else st.plate_img
-            event_id = self.store.save_event(ev, full=st.best_full, crop=st.best_crop, plate=plate_photo)
+            full, crop = (st.plate_full, st.plate_crop) if st.plate_crop is not None else (st.best_full, st.best_crop)
+            event_id = self.store.save_event(ev, full=full, crop=crop, plate=plate_photo)
             if norm:
                 self.last_plate[norm] = (ev["ts"], event_id, conf)
         else:
