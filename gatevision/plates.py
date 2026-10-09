@@ -344,7 +344,11 @@ def vote(reads: list[PlateRead], min_conf: float = 0.0):
 
     Returns (text, confidence, best_read) or (None, 0, None).
     A read's weight is its OCR confidence, boosted when it fits the plate
-    pattern. Confidence is the winner's share of the total weight.
+    pattern. Reads of the same plate that differ in a character or two
+    (AWS5573, AWS5578, ARS5573 ...) are one candidate: the text is decided
+    character by character, so a clear plate is not lost because each frame
+    misread a different letter. Confidence is that candidate's share of the
+    total weight.
     """
     score: dict[str, float] = defaultdict(float)
     best: dict[str, PlateRead] = {}
@@ -364,5 +368,35 @@ def vote(reads: list[PlateRead], min_conf: float = 0.0):
             best[r.text] = r
     if not score:
         return None, 0.0, None
-    text = max(score, key=score.get)
-    return text, score[text] / total if total else 0.0, best[text]
+
+    # group spellings of the same plate: same length, at most 2 characters apart
+    groups: list[list[str]] = []
+    for t in sorted(score, key=score.get, reverse=True):
+        for g in groups:
+            if len(g[0]) == len(t) and sum(a != b for a, b in zip(g[0], t)) <= 2:
+                g.append(t)
+                break
+        else:
+            groups.append([t])
+    group = max(groups, key=lambda g: sum(score[t] for t in g))
+    weight = sum(score[t] for t in group)
+    text = group[0]
+    if len(group) > 1:                    # character by character, weighted
+        lead: dict[int, float] = defaultdict(float)      # how many letters before the number
+        for t in group:
+            lead[len(re.match(r"[A-Z]*", t).group(0))] += score[t]
+        n_letters = max(lead, key=lead.get)
+        chars = []
+        for i in range(len(text)):
+            votes: dict[str, float] = defaultdict(float)
+            for t in group:
+                ch = _TO_LETTER.get(t[i], t[i]) if i < n_letters else _TO_DIGIT.get(t[i], t[i])
+                votes[ch] += score[t]
+            chars.append(max(votes, key=votes.get))
+        consensus, ok = correct_pk_plate("".join(chars))
+        if ok:
+            text = consensus
+    top = max((best[t] for t in group), key=lambda r: r.conf)
+    if text not in best:
+        best[text] = PlateRead(text, top.raw, top.conf, True, top.box, top.det_conf)
+    return text, weight / total if total else 0.0, best[text]
