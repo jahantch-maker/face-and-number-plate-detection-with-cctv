@@ -382,15 +382,14 @@ class PlateRobustnessTests(PipelineTests):
     def _stopped(self, n=30):
         return [[Det(1, "motorcycle", 0.9, box(400, w=500, h=300))] for _ in range(n)]
 
-    def test_plate_photo_is_kept_even_when_text_cannot_be_read(self):
-        class DetectsOnly:
+    def test_no_plate_photo_when_nothing_on_it_can_be_read(self):
+        class DetectsOnly:           # a foot or a lamp: the finder says plate, the reader reads nothing
             def read(self, img):
-                return [PlateRead("", "", 0.0, False, (10, 10, 90, 40), det_conf=0.9)]
+                return [PlateRead("", "", 0.0, False, (10, 10, 90, 40), det_conf=0.9),
+                        PlateRead("AB12", "AB12", 0.45, True, (10, 10, 90, 40), det_conf=0.9, char_conf=0.15)]
         worker = CameraWorker(self.cam(), self.cfg, FakeDetector(self._stopped()), self.store, plates=DetectsOnly())
         self._run_stop(worker)
-        row = self.db.search({})[0][0]
-        self.assertIsNone(row["plate_text"])
-        self.assertTrue(row["plate_path"] and (self.dir / row["plate_path"]).exists())
+        self.assertFalse(self.db.search({})[0][0]["plate_path"])
 
     def test_uncertain_read_is_saved_with_low_confidence(self):
         class Unsure:

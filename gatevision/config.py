@@ -37,6 +37,7 @@ DEFAULTS = {
         "min_plate_conf": 0.20,      # reads below 0.5 are shown with a "?" so a human checks the photo
         "min_show_conf": 0.15,       # final plate text below this is not saved as the plate (kept as a "guess")
         "min_single_read_conf": 0.35, # ... nor when only ONE read supports it and it is below this
+        "min_plate_photo_conf": 0.30, # no plate photo when its characters are read with less than this (feet, lamps, cargo)
         # "Near the camera only" rules. Sizes are fractions of the picture, so
         # they work for any camera resolution. Override per camera with
         # min_height / min_width / require_face / person_conf in config.yaml.
