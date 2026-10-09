@@ -30,7 +30,7 @@ def main():
 
     if args.role == "plate":
         from gatevision.plates import PlateReader, pretty
-        plates = PlateReader(m["plate_detector"], m["plate_ocr"])
+        plates = PlateReader(m["plate_detector"], m["plate_ocr"], ocr_custom=m.get("plate_ocr_custom"))
     else:
         from gatevision.faces import FaceDetector
         faces = FaceDetector("models/face_detection_yunet_2023mar.onnx")
