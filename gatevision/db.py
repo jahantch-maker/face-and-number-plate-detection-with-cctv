@@ -142,6 +142,12 @@ class Database:
             cur = c.execute(f"INSERT INTO events ({cols}) VALUES ({marks})", row)
             return cur.lastrowid
 
+    def update_event_plate(self, event_id: int, plate_text: str, plate_conf: float):
+        """A later sighting read the same vehicle's plate better: correct the record."""
+        with self._conn() as c:
+            c.execute("UPDATE events SET plate_text=?, plate_norm=?, plate_conf=? WHERE id=?",
+                      (plate_text, norm_plate(plate_text) or None, plate_conf, event_id))
+
     def get_event(self, event_id: int):
         return self._conn().execute(
             "SELECT * FROM events WHERE id=?", (event_id,)

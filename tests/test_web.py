@@ -83,6 +83,23 @@ class WebTests(unittest.TestCase):
         self.assertEqual(c.get("/media/../gatevision.db").status_code, 404)
         self.assertEqual(c.get("/event/9999").status_code, 404)
 
+    def test_event_detail_shows_unsure_plate_and_guess(self):
+        img = np.full((120, 200, 3), 230, np.uint8)
+        unsure = self.store.save_event(dict(ts=time.time() - 5, camera_id="c1", camera_name="RG Barrier IN 1",
+                                            direction="IN", kind="vehicle", plate_text="FDX-4944", plate_conf=0.3),
+                                       crop=img, plate=img)
+        guessed = self.store.save_event(dict(ts=time.time() - 4, camera_id="c1", camera_name="RG Barrier IN 1",
+                                             direction="IN", kind="vehicle", extra={"plate_guess": "UCC-433"}),
+                                        crop=img, plate=img)
+        c = self.app.test_client()
+        self.login(c, "boss")
+        html = c.get(f"/event/{unsure}").get_data(as_text=True)
+        self.assertIn("FDX-4944?", html)
+        self.assertIn("Uncertain", html)
+        html = c.get(f"/event/{guessed}").get_data(as_text=True)
+        self.assertIn("plate not read", html)
+        self.assertIn("UCC-433?", html)
+
     def test_guard_sees_live_only(self):
         c = self.app.test_client()
         self.login(c, "guard1")

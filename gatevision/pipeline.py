@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
 import time
 from collections import Counter, deque
 
 import cv2
 
 from .colors import clothing_colors, vehicle_color
-from .db import _fuzzy_match, norm_plate
+from .db import _fuzzy_match, canon_plate, edit_distance_le1, norm_plate
 from .enhance import enhance_face, enhance_plate
 from .plates import pretty, vote
 
@@ -115,12 +116,22 @@ class CameraWorker:
         self.plates = plates
         self.faces = faces
         self.tracks: dict[int, TrackState] = {}
-        self.last_plate: dict[str, float] = {}   # plate_norm -> ts of last event
+        self.last_plate: dict[str, tuple] = {}   # plate_norm -> (ts of last event, event id, conf)
         self.last_event_ts: float | None = None
         self.events_saved = 0
         self.recent: list = []                    # (last_seen, last_pos) of recently recorded tracks
         self.stats: Counter = Counter()           # why things were saved / skipped (shown on the Cameras page)
         self.started = time.time()
+        # Background plate reading (switched on by run()). Reading one plate runs
+        # the reader many times and is slow on a CPU; doing it here would stop
+        # this camera from watching while vehicles drive past. Instead the newest
+        # sharpest crop of each vehicle waits in a slot and a helper thread reads it.
+        self._ocr_thread = None
+        self._ocr_lock = threading.Lock()
+        self._ocr_wake = threading.Event()
+        self._ocr_pending: dict = {}             # track id -> (crop, frame, box, sharpness)
+        self._ocr_busy: set = set()              # track ids being read right now
+        self._ocr_done: deque = deque()          # (track id, [(reads, image), ...]) ready to apply
 
     # --------------------------------------------------------------- step
     def step(self, frame, ts: float):
@@ -128,6 +139,7 @@ class CameraWorker:
         rx1, ry1, rx2, ry2 = self.cam["roi"]
         roi = (rx1 * W, ry1 * H, rx2 * W, ry2 * H)
         role = self.cam["role"]
+        self._apply_ocr_results()
 
         cam = self.cam
         min_h = cam.get("min_height", self.t["min_person_height"])
@@ -158,7 +170,10 @@ class CameraWorker:
             if eligible and ts - st.last_try >= self.t["ocr_interval"]:
                 if role == "plate" and self.plates and st.ocr_attempts < self.t["max_ocr_attempts"]:
                     st.last_try = ts
-                    self._read_plate(st, frame, d)
+                    if self._ocr_thread is not None:
+                        self._queue_plate(st, frame, d)
+                    else:
+                        self._read_plate(st, frame, d)
                 elif role == "face" and self.faces and st.face_attempts < self.t["max_face_attempts"]:
                     st.last_try = ts
                     self._find_face(st, frame, d)
@@ -166,11 +181,14 @@ class CameraWorker:
         for tid, st in list(self.tracks.items()):
             gone = ts - st.last_seen > self.t["lost_seconds"]
             too_long = ts - st.first_seen > self.t["max_dwell_seconds"]
+            if gone and self._ocr_waiting(tid) and ts - st.last_seen < self.t["lost_seconds"] + 5:
+                continue                      # its last plate pictures are still being read
             if gone or too_long:
                 self._finalize(st)
                 del self.tracks[tid]
 
     def flush(self):
+        self._apply_ocr_results()
         for st in list(self.tracks.values()):
             self._finalize(st)
         self.tracks.clear()
@@ -197,16 +215,78 @@ class CameraWorker:
         crop = _clip_crop(frame, det.box, pad=0.08)
         if crop is None:
             return
+        whole = not any(r.text for r in st.reads) and st.ocr_attempts % 3 == 0
+        for reads, image in self._plate_reads(crop, frame, det.box, whole):
+            self._take_reads(st, reads, image)
+
+    def _plate_reads(self, crop, frame, box, whole: bool):
+        """Read one vehicle crop. ``whole``: also look at the whole picture, for
+        when the crop has given no readable text so far. Returns [(reads, image)]."""
         read = getattr(self.plates, "read_robust", self.plates.read)
-        self._take_reads(st, read(crop), crop)
-        # every 3rd attempt without any readable text: look at the whole picture too
-        if not any(r.text for r in st.reads) and st.ocr_attempts % 3 == 0:
-            x1, y1, x2, y2 = det.box
+        out = [(read(crop), crop)]
+        if whole and not any(r.text for r in out[0][0]):
+            x1, y1, x2, y2 = box
             gx, gy = (x2 - x1) * 0.15, (y2 - y1) * 0.15
-            for r in read(frame):
-                if r.box and x1 - gx <= (r.box[0] + r.box[2]) / 2 <= x2 + gx \
-                        and y1 - gy <= (r.box[1] + r.box[3]) / 2 <= y2 + gy:
-                    self._take_reads(st, [r], frame)
+            near = [r for r in read(frame)
+                    if r.box and x1 - gx <= (r.box[0] + r.box[2]) / 2 <= x2 + gx
+                    and y1 - gy <= (r.box[1] + r.box[3]) / 2 <= y2 + gy]
+            out.append((near, frame))
+        return out
+
+    # ------------------------------------------------- background plate reading
+    def start_ocr(self):
+        if self._ocr_thread is None and self.plates is not None and self.cam["role"] == "plate":
+            self._ocr_thread = threading.Thread(target=self._ocr_loop, name=f"ocr-{self.cam['id']}", daemon=True)
+            self._ocr_thread.start()
+
+    def _queue_plate(self, st: TrackState, frame, det):
+        crop = _clip_crop(frame, det.box, pad=0.08)
+        if crop is None:
+            return
+        sharp = _sharpness(crop) * math.sqrt(crop.shape[0] * crop.shape[1])
+        with self._ocr_lock:
+            old = self._ocr_pending.get(st.id)
+            if old is None:
+                st.ocr_attempts += 1
+            elif old[3] >= sharp:
+                return                        # the waiting picture of this vehicle is clearer
+            self._ocr_pending[st.id] = (crop, frame, det.box, sharp)
+        self._ocr_wake.set()
+
+    def _ocr_waiting(self, track_id) -> bool:
+        if self._ocr_thread is None:
+            return False
+        with self._ocr_lock:
+            return track_id in self._ocr_pending or track_id in self._ocr_busy
+
+    def _ocr_loop(self):
+        while True:
+            self._ocr_wake.wait(0.5)
+            with self._ocr_lock:
+                if not self._ocr_pending:
+                    self._ocr_wake.clear()
+                    continue
+                tid = next(iter(self._ocr_pending))       # oldest waiting vehicle first
+                crop, frame, box, _ = self._ocr_pending.pop(tid)
+                self._ocr_busy.add(tid)
+                st = self.tracks.get(tid)
+                whole = st is not None and not any(r.text for r in st.reads) and st.ocr_attempts % 3 == 0
+            try:
+                result = self._plate_reads(crop, frame, box, whole)
+            except Exception:
+                log.exception("%s: plate reading error", self.cam["id"])
+                result = []
+            with self._ocr_lock:
+                self._ocr_done.append((tid, result))
+                self._ocr_busy.discard(tid)
+
+    def _apply_ocr_results(self):
+        while self._ocr_done:
+            tid, result = self._ocr_done.popleft()
+            st = self.tracks.get(tid)
+            if st is not None:
+                for reads, image in result:
+                    self._take_reads(st, reads, image)
 
     def _take_reads(self, st: TrackState, reads, image):
         """Keep readable texts for voting, and the best plate PHOTO even if the
@@ -247,6 +327,27 @@ class CameraWorker:
             score = sc * fw * fh * (1.0 + min(_sharpness(fc), 400.0) / 100.0) * _brightness_ok(fc)
             if score > st.face_score:
                 st.face_score, st.face_img = score, fc.copy()
+
+    def _same_plate_recently(self, norm: str, conf: float, ts: float) -> bool:
+        """True if this plate, or one differing by a single character (DN6555 /
+        FDN6555, a letter lost at the picture edge), was recorded by this camera
+        within ``dedup_seconds``. The earlier record then gets the better text:
+        the longer one, or the surer one when both are the same length."""
+        window = self.t["dedup_seconds"]
+        self.last_plate = {k: v for k, v in self.last_plate.items() if ts - v[0] < max(window, 60)}
+        canon = canon_plate(norm)
+        for old, (old_ts, event_id, old_conf) in list(self.last_plate.items()):
+            if ts - old_ts > window or not edit_distance_le1(canon, canon_plate(old)):
+                continue
+            better = len(norm) > len(old) or (len(norm) == len(old) and conf > old_conf)
+            if better and norm != old and event_id is not None:
+                self.store.db.update_event_plate(event_id, pretty(norm), conf)
+                del self.last_plate[old]
+                self.last_plate[norm] = (ts, event_id, conf)
+            else:
+                self.last_plate[old] = (ts, event_id, old_conf)
+            return True
+        return False
 
     def _is_retrack(self, st: TrackState, sig=None, plate: str = "") -> bool:
         """True if ``st`` is the SAME object as a track recorded moments ago.
@@ -303,20 +404,26 @@ class CameraWorker:
         }
         if cam["role"] == "plate":
             conf = best.conf * share if best else 0.0          # how sure we are of the final text
+            agree = sum(1 for r in st.reads if r.text == plate)
+            if plate and (conf < self.t["min_show_conf"] or (agree < 2 and conf < self.t["min_single_read_conf"])):
+                # one weak read, or readers that disagree: a made-up number would
+                # only mislead the search. Keep the guess for the detail page.
+                ev["extra"]["plate_guess"] = pretty(plate)
+                self.stats["plate too unsure"] += 1
+                plate, conf = None, 0.0
             norm = plate or ""
-            if norm and self.last_plate.get(norm, -1e9) > ev["ts"] - self.t["dedup_seconds"]:
-                self.last_plate[norm] = ev["ts"]
+            if norm and self._same_plate_recently(norm, conf, ev["ts"]):
                 self.stats["same plate again"] += 1
                 return                      # same vehicle seen again moments ago
-            if norm:
-                self.last_plate[norm] = ev["ts"]
             ev.update(kind="vehicle", vehicle_type=label,
                       color=vehicle_color(st.best_crop),
                       plate_text=pretty(plate) if plate else None, plate_conf=conf)
             ev["extra"]["plate_reads"] = len(st.reads)
             ev["extra"]["plate_raw"] = best.raw if best else None
             plate_photo = enhance_plate(st.plate_img) if (st.plate_img is not None and self.cfg.get("enhance", {}).get("plates", True)) else st.plate_img
-            self.store.save_event(ev, full=st.best_full, crop=st.best_crop, plate=plate_photo)
+            event_id = self.store.save_event(ev, full=st.best_full, crop=st.best_crop, plate=plate_photo)
+            if norm:
+                self.last_plate[norm] = (ev["ts"], event_id, conf)
         else:
             if self.cam.get("require_face", self.t["require_face"]) and st.face_img is None:
                 self.stats["no face found"] += 1
@@ -334,6 +441,7 @@ class CameraWorker:
 
     # ---------------------------------------------------------- main loop
     def run(self, stream, stop_event, status_db=None):
+        self.start_ocr()
         pf = self.t["process_fps"]
         interval = 0.0 if pf <= 0 else 1.0 / max(pf, 0.5)      # 0 = as fast as the PC can
         last_idx, last_proc, last_status = -1, 0.0, 0.0
