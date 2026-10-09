@@ -11,12 +11,16 @@ first, because those are what we most need to teach.
 from __future__ import annotations
 
 import argparse
+import io
 import threading
+import time
+import zipfile
 from functools import wraps
 
-from flask import Flask, Response, abort, redirect, render_template_string, request, send_from_directory, url_for
+from flask import (Flask, Response, abort, redirect, render_template_string, request, send_file,
+                   send_from_directory, url_for)
 
-from common import UNREADABLE, clean_label, data_dir, plates_dir, read_labels, write_labels
+from common import NOT_PLATE, UNREADABLE, clean_label, data_dir, has_text, plates_dir, read_labels, write_labels
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -29,11 +33,12 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8">
    text-transform:uppercase;border:2px solid #888;border-radius:8px;margin:12px 0}
  button{font-size:18px;padding:12px 16px;border-radius:8px;border:0;margin:4px 4px 4px 0}
  .save{background:#1a7f37;color:#fff}.bad{background:#b42318;color:#fff}.skip{background:#ddd}
+ .none{background:#6e40c9;color:#fff}
  .muted{color:#666;font-size:14px}
  a{color:#0550ae}
 </style></head><body><div class="box">
 <p class="muted">{{done}} labelled, {{todo}} to go ({{bikes_todo}} bikes / rickshaws).
- Unreadable so far: {{bad}}.</p>
+ Unreadable so far: {{bad}}. Not a plate: {{not_plate}}.</p>
 {% if row %}
  <img src="{{url_for('image', name=row.file)}}" alt="plate">
  <p class="muted">{{row.vehicle or 'vehicle'}} &middot; {{row.camera}} &middot; {{row.time}}
@@ -42,15 +47,18 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8">
   <input type="hidden" name="file" value="{{row.file}}">
   <input type="text" name="label" value="{{row.label if row.label and row.label != '-' else row.guess}}" autofocus
     autocapitalize="characters" spellcheck="false">
-  <div class="muted">Letters and the big number only, no dash and no small year: LEA-17-5989 is LEA5989.</div>
+  <div class="muted">Letters and the big number only, no dash and no small year: LEA-17-5989 is LEA5989.
+   <b>Can't read it</b> = it is a plate but too blurry. <b>Not a plate</b> = feet, lamp, cargo, anything else.</div>
   <button class="save" name="action" value="save">Save (Enter)</button>
   <button class="bad" name="action" value="bad">Can't read it</button>
+  <button class="none" name="action" value="none">Not a plate</button>
   <button class="skip" name="action" value="skip">Skip</button>
  </form>
 {% else %}
  <h2>All photos are labelled.</h2>
  <p>Run collect_plates.bat again in a few days to get new photos.</p>
 {% endif %}
+<p class="muted"><a href="{{url_for('download')}}">Download all photos and labels (zip)</a></p>
 {% if recent %}<p class="muted">Recently labelled (tap to fix):
  {% for r in recent %}<a href="{{url_for('index', file=r.file)}}">{{r.label}}</a> {% endfor %}</p>{% endif %}
 </div></body></html>"""
@@ -92,11 +100,12 @@ def create_app():
             # bikes and rickshaws first: those are the plates the reader gets wrong
             fresh.sort(key=lambda r: (r["vehicle"] not in BIKES, r["time"]))
             row = fresh[0] if fresh else None
-        recent = [r for r in rows if r["label"] and r["label"] != UNREADABLE][-12:][::-1]
+        recent = [r for r in rows if has_text(r["label"])][-12:][::-1]
         return render_template_string(
             PAGE, row=row, recent=recent, todo=len(todo),
-            done=sum(1 for r in rows if r["label"] and r["label"] != UNREADABLE),
+            done=sum(1 for r in rows if has_text(r["label"])),
             bad=sum(1 for r in rows if r["label"] == UNREADABLE),
+            not_plate=sum(1 for r in rows if r["label"] == NOT_PLATE),
             bikes_todo=sum(1 for r in todo if r["vehicle"] in BIKES))
 
     @app.post("/save")
@@ -106,7 +115,7 @@ def create_app():
         if action == "skip":
             skipped.add(name)
             return redirect(url_for("index"))
-        label = UNREADABLE if action == "bad" else clean_label(request.form.get("label", ""))
+        label = {"bad": UNREADABLE, "none": NOT_PLATE}.get(action) or clean_label(request.form.get("label", ""))
         if not label:
             label = UNREADABLE
         with lock:
@@ -119,6 +128,26 @@ def create_app():
                 abort(404)
             write_labels(labels_path, rows)
         return redirect(url_for("index"))
+
+    @app.get("/download")
+    @auth
+    def download():
+        """Everything in one zip, e.g. to send for training: labels.csv, the
+        plate photos (images/) and, while Gate Vision still has them, the
+        vehicle photos they came from (vehicles/), to check the plate finder."""
+        buf = io.BytesIO()
+        ddir = data_dir()
+        with lock, zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(labels_path, "labels.csv")
+            for p in sorted((folder / "images").glob("*.jpg")):
+                z.write(p, f"images/{p.name}")
+                row = db.get_event(int(p.stem)) if p.stem.isdigit() else None
+                src = ddir / row["crop_path"] if row is not None and row["crop_path"] else None
+                if src is not None and src.is_file():
+                    z.write(src, f"vehicles/{p.name}")
+        buf.seek(0)
+        return send_file(buf, mimetype="application/zip", as_attachment=True,
+                         download_name=f"gate_plates_{time.strftime('%Y%m%d')}.zip")
 
     @app.get("/img/<path:name>")
     @auth

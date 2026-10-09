@@ -11,7 +11,9 @@ labels.csv columns:
     guess    what Gate Vision read at the time (may be wrong or empty)
     label    the CORRECT plate, typed by a person: letters + number, no dash,
              no year (LEA-17-5989 -> LEA5989). Empty = not checked yet.
-             "-" = unreadable (skipped in training and in the score).
+             "-" = a plate, but unreadable; "!" = not a plate at all (feet,
+             lamps, cargo the plate finder mistook for a plate). Both are
+             skipped when training the reader and in its score.
     vehicle  car / motorcycle / truck ...
     camera   camera id
     time     when it was seen
@@ -29,6 +31,12 @@ if str(ROOT) not in sys.path:
 
 FIELDS = ["file", "guess", "label", "vehicle", "camera", "time"]
 UNREADABLE = "-"
+NOT_PLATE = "!"
+
+
+def has_text(label: str) -> bool:
+    """True for a typed plate, False for empty / unreadable / not a plate."""
+    return bool(label) and label not in (UNREADABLE, NOT_PLATE)
 
 
 def data_dir() -> Path:
@@ -50,6 +58,8 @@ def clean_label(text: str) -> str:
     t = (text or "").strip().upper()
     if t in (UNREADABLE, "X", "?"):
         return UNREADABLE
+    if t == NOT_PLATE:
+        return NOT_PLATE
     return re.sub(r"[^A-Z0-9]", "", t)
 
 

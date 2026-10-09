@@ -23,6 +23,12 @@ class LabelTests(unittest.TestCase):
         self.assertEqual(common.clean_label(" lea-5989 "), "LEA5989")
         self.assertEqual(common.clean_label("x"), common.UNREADABLE)
         self.assertEqual(common.clean_label("-"), common.UNREADABLE)
+        self.assertEqual(common.clean_label("!"), common.NOT_PLATE)
+
+    def test_only_typed_plates_count_as_text(self):
+        self.assertTrue(common.has_text("LEA5989"))
+        for label in ("", common.UNREADABLE, common.NOT_PLATE):
+            self.assertFalse(common.has_text(label))
 
     def test_labels_round_trip(self):
         with tempfile.TemporaryDirectory() as d:

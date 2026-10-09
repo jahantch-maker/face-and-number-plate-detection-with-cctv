@@ -23,7 +23,7 @@ import random
 import re
 from pathlib import Path
 
-from common import UNREADABLE
+from common import has_text
 
 BIKES = ("motorcycle", "bicycle")
 
@@ -33,7 +33,7 @@ def own_rows(path: Path):
     with path.open(newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):
             label = (r.get("label") or "").upper()
-            if label and label != UNREADABLE:
+            if has_text(label):
                 out.append({"img": str((path.parent / "images" / r["file"]).resolve()), "text": label,
                             "bike": r.get("vehicle") in BIKES, "own": True})
     return out

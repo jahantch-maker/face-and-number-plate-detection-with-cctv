@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import shutil
 
-from common import ROOT, UNREADABLE, plates_dir, read_labels
+from common import ROOT, has_text, plates_dir, read_labels
 
 
 def main():
     folder = plates_dir()
     rows = read_labels(folder / "labels.csv")
-    labelled = [r for r in rows if r["label"] and r["label"] != UNREADABLE]
+    labelled = [r for r in rows if has_text(r["label"])]
     if not labelled:
         print("No labelled photos yet: run collect_plates.bat and label_plates.bat first.")
         return
