@@ -28,6 +28,24 @@ class PlateRead:
     valid: bool          # matches the letters+digits pattern
     box: tuple | None = None   # (x1,y1,x2,y2) relative to the image given to read()
     det_conf: float = 0.0      # how sure the detector is that this is a plate
+    char_conf: float | None = None   # mean confidence of the characters actually read (None: use conf)
+
+    @property
+    def text_conf(self) -> float:
+        return self.conf if self.char_conf is None else self.char_conf
+
+
+def _confs(o) -> tuple[float, float]:
+    """(mean over all reader slots, mean over the characters actually read).
+    The empty slots after a short plate are always sure, which lifts the first
+    number even for a foot or a lamp; the second one stays low for those."""
+    conf = getattr(o, "confidence", 0.0)
+    if not isinstance(conf, (list, tuple, np.ndarray)):
+        return float(conf or 0.0), float(conf or 0.0)
+    if not len(conf):
+        return 0.0, 0.0
+    n = len((getattr(o, "text", "") or "").replace("_", ""))
+    return float(np.mean(conf)), float(np.mean(conf[:n])) if n else 0.0
 
 
 def variants(bgr):
@@ -183,9 +201,19 @@ FALLBACK_DETECTORS = ["yolo-v9-t-640-license-plate-end2end", "yolo-v9-t-512-lice
 FALLBACK_DETECTOR = FALLBACK_DETECTORS[-1]
 
 
+def _custom_ocr_files(path):
+    """(model.onnx, model_config.yaml) when a trained reader is in place, else None."""
+    from pathlib import Path
+    if not path:
+        return None
+    model = Path(path)
+    cfg = model.with_name(model.stem + "_config.yaml")
+    return (model, cfg) if model.is_file() and cfg.is_file() else None
+
+
 class PlateReader:
     def __init__(self, detector_model: str, ocr_model: str, use_gpu: bool = False,
-                 detector_conf_thresh: float | None = None):
+                 detector_conf_thresh: float | None = None, ocr_custom: str | None = None):
         import logging
         from fast_alpr import ALPR  # lazy import
 
@@ -193,6 +221,20 @@ class PlateReader:
         gpu = {"detector_providers": ["CUDAExecutionProvider", "CPUExecutionProvider"],
                "ocr_providers": ["CUDAExecutionProvider", "CPUExecutionProvider"]} if use_gpu else {}
         thresh = {"detector_conf_thresh": detector_conf_thresh} if detector_conf_thresh else {}
+        ocr = {"ocr_model": ocr_model}
+        self.ocr_name = ocr_model
+        custom = _custom_ocr_files(ocr_custom)
+        if custom:
+            try:                         # check it loads before handing it to the plate finder
+                from fast_plate_ocr import LicensePlateRecognizer
+                LicensePlateRecognizer(onnx_model_path=custom[0], plate_config_path=custom[1])
+            except Exception as exc:     # a broken or too-new trained reader must not stop the cameras
+                log.warning("trained plate reader %s could not be loaded (%s) - using %s", custom[0], exc, ocr_model)
+                custom = None
+        if custom:                       # our own reader, trained on Pakistani plates (training/README.md)
+            ocr = {"ocr_model": None, "ocr_model_path": custom[0], "ocr_config_path": custom[1]}
+            self.ocr_name = str(custom[0])
+            log.info("using the trained plate reader %s", custom[0])
         # tolerate fast-alpr versions that do not know some keywords
         kw_sets = [{**gpu, **thresh}, thresh, gpu, {}]
         models = [detector_model] + [m for m in FALLBACK_DETECTORS if m != detector_model]
@@ -200,7 +242,7 @@ class PlateReader:
         for model in models:
             for kw in kw_sets:
                 try:
-                    self.alpr = ALPR(detector_model=model, ocr_model=ocr_model, **kw)
+                    self.alpr = ALPR(detector_model=model, **ocr, **kw)
                     self.detector_model = model
                     if model != detector_model:
                         log.warning("plate detector %s unavailable (%s) - using %s", detector_model, last, model)
@@ -210,6 +252,10 @@ class PlateReader:
                 except Exception as exc:          # unknown model name, download problem ...
                     last = exc
                     break
+        if custom:                       # a broken or too-new trained reader must not stop the cameras
+            log.warning("trained plate reader %s could not be loaded (%s) - using %s", custom[0], last, ocr_model)
+            self.__init__(detector_model, ocr_model, use_gpu, detector_conf_thresh)
+            return
         raise last
 
     def read(self, bgr, extra_ocr: bool = True) -> list[PlateRead]:
@@ -223,21 +269,19 @@ class PlateReader:
             if det_conf >= 0.35:
                 two = self._two_line(self._crop(bgr, box))
                 if two:                      # two-line plate read row by row: letters + number, year skipped
-                    out.append(PlateRead(two[0], "two-line", two[1], True, box, det_conf))
+                    out.append(PlateRead(two[0], "two-line", two[1], True, box, det_conf, two[2]))
                     continue
             ocr = getattr(r, "ocr", None)
             if ocr is None or not getattr(ocr, "text", None):
                 out.append(PlateRead("", "", 0.0, False, box, det_conf))
                 continue
-            conf = getattr(ocr, "confidence", 0.0)
-            if isinstance(conf, (list, tuple, np.ndarray)):
-                conf = float(np.mean(conf)) if len(conf) else 0.0
+            conf, char_conf = _confs(ocr)
             text, valid = correct_pk_plate(ocr.text)
             text = drop_year(text)
             if len(text) < 3:
                 out.append(PlateRead("", ocr.text, 0.0, False, box, det_conf))
                 continue
-            out.append(PlateRead(text, ocr.text, float(conf), valid, box, det_conf))
+            out.append(PlateRead(text, ocr.text, conf, valid, box, det_conf, char_conf))
         if extra_ocr:
             for r in list(out):
                 if r.box and r.det_conf >= 0.35:
@@ -252,32 +296,29 @@ class PlateReader:
         return bgr[max(0, y1 - py):min(h, y2 + py), max(0, x1 - px):min(w, x2 + px)]
 
     def _ocr_raw(self, img):
-        """(raw text, confidence) from the plate reader for one picture, or ("", 0)."""
+        """(raw text, confidence, character confidence) for one picture, or ("", 0, 0)."""
         ocr_model = getattr(self.alpr, "ocr", None)
         if ocr_model is None:
-            return "", 0.0
+            return "", 0.0, 0.0
         try:
             o = ocr_model.predict(img)
         except Exception:
-            return "", 0.0
+            return "", 0.0, 0.0
         if o is None or not getattr(o, "text", None):
-            return "", 0.0
-        conf = getattr(o, "confidence", 0.0)
-        if isinstance(conf, (list, tuple, np.ndarray)):
-            conf = float(np.mean(conf)) if len(conf) else 0.0
-        return o.text, float(conf)
+            return "", 0.0, 0.0
+        return (o.text, *_confs(o))
 
     def _two_line(self, plate_img):
-        """Read a two-line plate row by row: (text, conf) or None if it is not one / unreadable."""
+        """Read a two-line plate row by row: (text, conf, char conf) or None if it is not one / unreadable."""
         rows = split_rows(plate_img)
         if rows is None:
             return None
-        top_text, top_conf = self._ocr_raw(rows[0])
-        bot_text, bot_conf = self._ocr_raw(rows[1])
+        top_text, top_conf, top_cc = self._ocr_raw(rows[0])
+        bot_text, bot_conf, bot_cc = self._ocr_raw(rows[1])
         text = compose_two_line(top_text, bot_text)
         if not text:
             return None
-        return text, min(top_conf, bot_conf)
+        return text, min(top_conf, bot_conf), min(top_cc, bot_cc)
 
     def _extra_reads(self, bgr, box, det_conf) -> list[PlateRead]:
         """Run only the OCR again on rotated / enlarged / top-line versions of the plate."""
@@ -288,15 +329,15 @@ class PlateReader:
         for _name, img in crop_variants(crop):
             two = self._two_line(img)
             if two:
-                out.append(PlateRead(two[0], "two-line", two[1], True, box, det_conf))
+                out.append(PlateRead(two[0], "two-line", two[1], True, box, det_conf, two[2]))
                 continue
-            raw, conf = self._ocr_raw(img)
+            raw, conf, char_conf = self._ocr_raw(img)
             if not raw:
                 continue
             text, valid = correct_pk_plate(raw)
             text = drop_year(text)
             if len(text) >= 3 and valid:
-                out.append(PlateRead(text, raw, conf, valid, box, det_conf))
+                out.append(PlateRead(text, raw, conf, valid, box, det_conf, char_conf))
         return out
 
     def read_robust(self, bgr) -> list[PlateRead]:
@@ -316,7 +357,11 @@ def vote(reads: list[PlateRead], min_conf: float = 0.0):
 
     Returns (text, confidence, best_read) or (None, 0, None).
     A read's weight is its OCR confidence, boosted when it fits the plate
-    pattern. Confidence is the winner's share of the total weight.
+    pattern. Reads of the same plate that differ in a character or two
+    (AWS5573, AWS5578, ARS5573 ...) are one candidate: the text is decided
+    character by character, so a clear plate is not lost because each frame
+    misread a different letter. Confidence is that candidate's share of the
+    total weight.
     """
     score: dict[str, float] = defaultdict(float)
     best: dict[str, PlateRead] = {}
@@ -336,5 +381,35 @@ def vote(reads: list[PlateRead], min_conf: float = 0.0):
             best[r.text] = r
     if not score:
         return None, 0.0, None
-    text = max(score, key=score.get)
-    return text, score[text] / total if total else 0.0, best[text]
+
+    # group spellings of the same plate: same length, at most 2 characters apart
+    groups: list[list[str]] = []
+    for t in sorted(score, key=score.get, reverse=True):
+        for g in groups:
+            if len(g[0]) == len(t) and sum(a != b for a, b in zip(g[0], t)) <= 2:
+                g.append(t)
+                break
+        else:
+            groups.append([t])
+    group = max(groups, key=lambda g: sum(score[t] for t in g))
+    weight = sum(score[t] for t in group)
+    text = group[0]
+    if len(group) > 1:                    # character by character, weighted
+        lead: dict[int, float] = defaultdict(float)      # how many letters before the number
+        for t in group:
+            lead[len(re.match(r"[A-Z]*", t).group(0))] += score[t]
+        n_letters = max(lead, key=lead.get)
+        chars = []
+        for i in range(len(text)):
+            votes: dict[str, float] = defaultdict(float)
+            for t in group:
+                ch = _TO_LETTER.get(t[i], t[i]) if i < n_letters else _TO_DIGIT.get(t[i], t[i])
+                votes[ch] += score[t]
+            chars.append(max(votes, key=votes.get))
+        consensus, ok = correct_pk_plate("".join(chars))
+        if ok:
+            text = consensus
+    top = max((best[t] for t in group), key=lambda r: r.conf)
+    if text not in best:
+        best[text] = PlateRead(text, top.raw, top.conf, True, top.box, top.det_conf, top.char_conf)
+    return text, weight / total if total else 0.0, best[text]
