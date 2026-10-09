@@ -570,3 +570,35 @@ class CaptureSpeedTests(PipelineTests):
             worker.step(f, 1000 + (len(a) + len(gap) + i) / 10)
         worker.step(f, 1000 + 20)
         self.assertEqual(self.db.search({})[1], 2)
+
+
+class VehiclePhotoTests(PipelineTests):
+    def test_vehicle_photo_is_from_when_the_plate_was_clearest_not_when_it_was_biggest(self):
+        # the car approaches (plate readable), then drives past the camera: bigger in the
+        # picture but the plate is gone. The saved photos must show the approach.
+        def scene(i):                                  # blue early, turning red later
+            f = np.zeros((720, 1280, 3), np.uint8)
+            f[:] = (160 - 5 * i, 100, 40 + 5 * i)
+            f[::7] = (120 - 4 * i, 70, 20 + 4 * i)     # texture so sharpness > 0
+            return f
+
+        def blue(img):
+            b, _, r = img.reshape(-1, 3).mean(axis=0)
+            return b > r
+
+        class ReadableWhileApproaching:
+            def read(self, img):
+                if blue(img):                          # early frames only
+                    return [PlateRead("CCG856", "CCG856", 0.95, True, (100, 100, 220, 150), det_conf=0.9)]
+                return []
+
+        n = 24
+        script = [[Det(1, "car", 0.9, (300, 200, 600 + 20 * i, 450 + 10 * i))] for i in range(n)]
+        worker = CameraWorker(self.cam(), self.cfg, FakeDetector(script), self.store, plates=ReadableWhileApproaching())
+        for i in range(n):
+            worker.step(scene(i), 1000 + i / 10)
+        worker.step(scene(0), 1000 + n / 10 + 6)
+        row = self.db.search({})[0][0]
+        self.assertEqual(row["plate_text"], "CCG-856")
+        self.assertTrue(blue(cv2.imread(str(self.dir / row["crop_path"]))))   # from the approach, not the biggest frame
+        self.assertTrue(blue(cv2.imread(str(self.dir / row["full_path"]))))
